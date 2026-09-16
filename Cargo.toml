@@ -1,6 +1,6 @@
 [package]
 name = "doit-gpui"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Doit - A minimalist todo app rewritten in pure Rust with GPUI Kit"
 
