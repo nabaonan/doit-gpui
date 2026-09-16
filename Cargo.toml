@@ -1,0 +1,39 @@
+[package]
+name = "doit-gpui"
+version = "0.1.0"
+edition = "2021"
+description = "Doit - A minimalist todo app rewritten in pure Rust with GPUI Kit"
+
+[dependencies]
+gpui-kit = "=0.6.0"
+# chrono is already a compiled dependency of gpui itself (its calendar/date-picker
+# link it); adding it here costs no new compilation. Needed for correct local-date
+# handling (calendar view, timeline grouping) that std alone cannot provide.
+chrono = "0.4"
+# serde / serde_json / base64 are likewise already in the resolved dependency tree
+# (gpui's http client and components depend on them); these are used for the
+# WebDAV snapshot sync (JSON serialization + HTTP Basic auth).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# futures is already a dependency of gpui's async/http stack; used to read the
+# WebDAV response body (AsyncBody implements futures::AsyncRead).
+futures = "0.3"
+# tokio is already a compiled dependency of gpui's stack; we own a handle so the
+# reqwest-backed WebDAV requests run on a real Tokio runtime regardless of gpui's
+# own executor.
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+# gpui-pre-reqwest is gpui's own vendored reqwest (already a transitive
+# dependency). We build the desktop HTTP client from it with proxies disabled,
+# because OS/environment proxies are the most common reason a private NAS
+# WebDAV endpoint fails with "error sending request for url". The feature set
+# mirrors gpui-pre-reqwest-client's, so nothing new gets compiled.
+gpui-pre-reqwest = { version = "=0.12.15", default-features = false, features = [
+    "charset",
+    "http2",
+    "macos-system-configuration",
+    "multipart",
+    "rustls-tls-native-roots",
+    "socks",
+    "stream",
+] }
