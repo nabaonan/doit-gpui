@@ -1,9 +1,8 @@
 use gpui_kit::base::Disableable as _;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme, Sizable, WindowExt,
+    ActiveTheme, Sizable,
     button::Button,
     input::{Input, InputState},
 };
@@ -18,15 +17,14 @@ use crate::webdav::{self, TransferState};
 
 // ── Backup / sync panel ─────────────────────────────────────────────────────
 
-/// Each operation (test / upload / download) tracks its own state, so running
-/// one does not disable the others.
+/// Each operation (test / sync) tracks its own state, so running one does not
+/// disable the other.
 pub struct BackupPanel {
     url: Entity<InputState>,
     user: Entity<InputState>,
     pass: Entity<InputState>,
     test_state: TransferState,
-    upload_state: TransferState,
-    download_state: TransferState,
+    sync_state: TransferState,
 }
 
 impl BackupPanel {
@@ -47,8 +45,7 @@ impl BackupPanel {
             user,
             pass,
             test_state: TransferState::Idle,
-            upload_state: TransferState::Idle,
-            download_state: TransferState::Idle,
+            sync_state: TransferState::Idle,
         }
     }
 
@@ -60,8 +57,7 @@ impl BackupPanel {
         cx: &mut Context<Self>,
     ) {
         self.test_state = TransferState::Idle;
-        self.upload_state = TransferState::Idle;
-        self.download_state = TransferState::Idle;
+        self.sync_state = TransferState::Idle;
         let mut set = |st: &Entity<InputState>, value: SharedString| {
             st.update(cx, |s, cx| s.set_value(value, window, cx));
         };
@@ -92,62 +88,31 @@ impl BackupPanel {
         });
     }
 
-    fn finish_upload(
+    /// Finish "立即同步": apply the merged snapshot (already persisted to the
+    /// cloud) onto local data and surface the result inline in the dialog.
+    /// Since the dialog is the top layer, no toast is needed — one visible
+    /// prompt, nothing occluded.
+    fn finish_sync(
         entity: Entity<Self>,
-        result: Result<String, String>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let ok = result.is_ok();
-        let msg = match result {
-            Ok(m) => m,
-            Err(e) => e,
-        };
-        entity.update(cx, |p, cx| {
-            p.upload_state = if ok {
-                TransferState::Ok(msg.clone())
-            } else {
-                TransferState::Err(msg.clone())
-            };
-            cx.notify();
-        });
-        let note = if ok {
-            Notification::success(msg).title("上传完成")
-        } else {
-            Notification::error(msg).title("上传失败")
-        };
-        window.push_notification(note, cx);
-    }
-
-    fn finish_download(
-        entity: Entity<Self>,
-        result: Result<SyncSnapshot, String>,
+        result: Result<(SyncSnapshot, String), String>,
         window: &mut Window,
         cx: &mut App,
     ) {
         match result {
-            Ok(snap) => {
-                let app = cx.try_global::<DoitAppHandle>().map(|h| h.0.clone());
-                if let Some(app) = app {
-                    let snap = snap.clone();
+            Ok((snap, msg)) => {
+                if let Some(app) = cx.try_global::<DoitAppHandle>().map(|h| h.0.clone()) {
                     app.update(cx, |app, cx| app.apply_snapshot(snap, window, cx));
                 }
                 entity.update(cx, |p, cx| {
-                    p.download_state =
-                        TransferState::Ok("下载成功，本地数据已恢复".to_string());
+                    p.sync_state = TransferState::Ok(msg);
                     cx.notify();
                 });
-                window.push_notification(
-                    Notification::success("下载成功，本地数据已恢复").title("下载恢复"),
-                    cx,
-                );
             }
             Err(e) => {
                 entity.update(cx, |p, cx| {
-                    p.download_state = TransferState::Err(e.clone());
+                    p.sync_state = TransferState::Err(e.clone());
                     cx.notify();
                 });
-                window.push_notification(Notification::error(e).title("下载恢复"), cx);
             }
         }
     }
@@ -158,8 +123,7 @@ impl Render for BackupPanel {
         let entity = cx.entity();
         let url_value = self.url.read(cx).value().to_string();
         let test_busy = matches!(self.test_state, TransferState::Busy);
-        let upload_busy = matches!(self.upload_state, TransferState::Busy);
-        let download_busy = matches!(self.download_state, TransferState::Busy);
+        let sync_busy = matches!(self.sync_state, TransferState::Busy);
 
         div()
             .v_flex()
@@ -264,18 +228,18 @@ impl Render for BackupPanel {
                             )
                             .child(action_status(&self.test_state, cx)),
                     )
-                    // 上传快照
+                    // 立即同步（双向无丢失合并：并集 + 较新者胜，本地与云端均停在最新版）
                     .child(
                         div()
                             .v_flex()
                             .gap_1()
                             .items_start()
                             .child(
-                                Button::new("backup-upload")
+                                Button::new("backup-sync")
                                     .small()
                                     .ghost()
-                                    .label(if upload_busy { "上传中…".to_string() } else { "上传".to_string() })
-                                    .disabled(upload_busy || url_value.is_empty())
+                                    .label(if sync_busy { "同步中…".to_string() } else { "立即同步".to_string() })
+                                    .disabled(sync_busy || url_value.is_empty())
                                     .on_click({
                                         let entity = entity.clone();
                                         let client = cx.http_client();
@@ -283,42 +247,90 @@ impl Render for BackupPanel {
                                             let entity = entity.clone();
                                             let client = client.clone();
                                             let cfg = entity.read(&*cx).config(&*cx);
-                                            let snapshot = {
-                                                let app = cx
-                                                    .try_global::<DoitAppHandle>()
-                                                    .map(|h| h.0.clone());
-                                                match app {
-                                                    Some(app) => {
-                                                        let (todos, settings) =
-                                                            app.read(cx).snapshot_data();
-                                                        SyncSnapshot {
+                                            entity.update(&mut *cx, |p, cx| {
+                                                p.sync_state = TransferState::Busy;
+                                                cx.notify();
+                                            });
+                                            push_config(&mut *cx, &cfg);
+                                            window.spawn(&*cx, async move |async_cx| {
+                                                // 1) 取云端快照（首次无备份 → None）
+                                                let remote = webdav::download_snapshot(
+                                                    client.as_ref(),
+                                                    &cfg.0,
+                                                    &cfg.1,
+                                                    &cfg.2,
+                                                )
+                                                .await;
+                                                // 2) 主线程构造本地快照；最新版本为准
+                                                //    （本地数据最后修改时间 vs 云端 exported_at），
+                                                //    本地更晚则删除/改动生效，云端更晚则拉取云端。
+                                                let merged: Result<SyncSnapshot, String> =
+                                                    match async_cx.update(|_window, app_cx| {
+                                                        let app = app_cx
+                                                            .try_global::<DoitAppHandle>()
+                                                            .map(|h| h.0.clone());
+                                                        let Some(app) = app else {
+                                                            return Err("内部错误：本地数据不可用"
+                                                                .to_string());
+                                                        };
+                                                        let last = app.read(app_cx).last_modified.clone();
+                                                        let (todos, settings) = (
+                                                            app.read(app_cx).todos.clone(),
+                                                            app.read(app_cx).settings.clone(),
+                                                        );
+                                                        let local = SyncSnapshot {
                                                             version: 1,
-                                                            exported_at: webdav::local_stamp(),
+                                                            exported_at: last.clone(),
                                                             todos,
                                                             settings,
+                                                        };
+                                                        match remote {
+                                                            Err(e) => Err(e),
+                                                            Ok(remote) => Ok(
+                                                                webdav::choose_authoritative(
+                                                                    &last,
+                                                                    local,
+                                                                    remote,
+                                                                ),
+                                                            ),
                                                         }
-                                                    }
-                                                    None => return,
-                                                }
-                                            };
-                                            entity.update(&mut *cx, |p, cx| {
-                                                p.upload_state = TransferState::Busy;
-                                                cx.notify();
-                                            });
-                                            push_config(&mut *cx, &cfg);
-                                            window.spawn(&*cx, async move |async_cx| {
-                                                let result = webdav::upload_snapshot(
-                                                    client.as_ref(),
-                                                    &cfg.0,
-                                                    &cfg.1,
-                                                    &cfg.2,
-                                                    &snapshot,
-                                                )
-                                                .await;
+                                                    }) {
+                                                        Ok(r) => r,
+                                                        Err(e) => {
+                                                            Err(format!("窗口更新失败：{e}"))
+                                                        }
+                                                    };
+                                                // 3) 把选定的版本以"现在"为同步时点写回云端；
+                                                //    成功后才应用到本地，保证两端停在同一版本。
+                                                let outcome: Result<(SyncSnapshot, String), String> =
+                                                    match merged {
+                                                        Ok(mut snap) => {
+                                                            snap.exported_at =
+                                                                webdav::local_stamp();
+                                                            match webdav::upload_snapshot(
+                                                                client.as_ref(),
+                                                                &cfg.0,
+                                                                &cfg.1,
+                                                                &cfg.2,
+                                                                &snap,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(_) => Ok((
+                                                                    snap,
+                                                                    "已同步，本地与云端均为最新"
+                                                                        .to_string(),
+                                                                )),
+                                                                Err(e) => Err(e),
+                                                            }
+                                                        }
+                                                        Err(e) => Err(e),
+                                                    };
+                                                // 4) 应用到本地并更新状态（结果在对话框内展示）
                                                 let _ = async_cx.update(|window, app_cx| {
-                                                    BackupPanel::finish_upload(
+                                                    BackupPanel::finish_sync(
                                                         entity.clone(),
-                                                        result,
+                                                        outcome,
                                                         window,
                                                         app_cx,
                                                     );
@@ -328,54 +340,7 @@ impl Render for BackupPanel {
                                         }
                                     }),
                             )
-                            .child(action_status(&self.upload_state, cx)),
-                    )
-                    // 下载恢复
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1()
-                            .items_start()
-                            .child(
-                                Button::new("backup-download")
-                                    .small()
-                                    .ghost()
-                                    .label(if download_busy { "下载中…".to_string() } else { "下载".to_string() })
-                                    .disabled(download_busy || url_value.is_empty())
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        let client = cx.http_client();
-                                        move |_, window, cx| {
-                                            let entity = entity.clone();
-                                            let client = client.clone();
-                                            let cfg = entity.read(&*cx).config(&*cx);
-                                            entity.update(&mut *cx, |p, cx| {
-                                                p.download_state = TransferState::Busy;
-                                                cx.notify();
-                                            });
-                                            push_config(&mut *cx, &cfg);
-                                            window.spawn(&*cx, async move |async_cx| {
-                                                let result = webdav::download_snapshot(
-                                                    client.as_ref(),
-                                                    &cfg.0,
-                                                    &cfg.1,
-                                                    &cfg.2,
-                                                )
-                                                .await;
-                                                let _ = async_cx.update(|window, app_cx| {
-                                                    BackupPanel::finish_download(
-                                                        entity.clone(),
-                                                        result,
-                                                        window,
-                                                        app_cx,
-                                                    );
-                                                });
-                                            })
-                                            .detach();
-                                        }
-                                    }),
-                            )
-                            .child(action_status(&self.download_state, cx)),
+                            .child(action_status(&self.sync_state, cx)),
                     ),
             )
     }
@@ -411,6 +376,7 @@ fn push_config(cx: &mut App, cfg: &(String, String, String)) {
             app.settings.cloud_sync.webdav_username = cfg.1.into();
             app.settings.cloud_sync.webdav_password = cfg.2.into();
             app.settings.cloud_sync.enabled = true;
+            app.save_local();
             cx.notify();
         });
     }

@@ -215,6 +215,7 @@ impl SettingsPanel {
             let settings = self.local.clone();
             app.update(cx, |app, cx| {
                 app.settings = settings;
+                app.save_local();
                 cx.notify();
             });
         }

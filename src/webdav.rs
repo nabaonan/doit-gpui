@@ -209,12 +209,14 @@ pub async fn upload_snapshot(
 }
 
 /// Download the snapshot from `{webdav_url}/doit-snapshot.json`.
+///
+/// Returns `Ok(None)` when the cloud has no backup file yet (first sync).
 pub async fn download_snapshot(
     client: &dyn HttpClient,
     url: &str,
     user: &str,
     pass: &str,
-) -> Result<SyncSnapshot, String> {
+) -> Result<Option<SyncSnapshot>, String> {
     check_config(url, user, pass)?;
     let target = join_url(url, SYNC_FILE);
     let req = Request::builder()
@@ -230,7 +232,7 @@ pub async fn download_snapshot(
         .map_err(|e| format!("下载失败：{}", classify_transport(e.as_ref())))?;
     let status = resp.status();
     if status == StatusCode::NOT_FOUND {
-        return Err("云端还没有备份文件（doit-snapshot.json），请先上传".to_string());
+        return Ok(None);
     }
     if !status.is_success() {
         return Err(format!("下载失败（HTTP {}）", status.as_u16()));
@@ -240,10 +242,97 @@ pub async fn download_snapshot(
     body.read_to_end(&mut bytes)
         .await
         .map_err(|e| format!("读取数据失败：{e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("解析云端数据失败：{e}"))
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| format!("解析云端数据失败：{e}"))
 }
 
 /// The current local time, ISO-8601 without timezone suffix (for snapshot stamps).
 pub(crate) fn local_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+/// Pick which snapshot is authoritative for a sync: **the newest version wins**.
+///
+/// `local_last_modified` is when this machine's data last changed
+/// (`DoitApp::last_modified`, persisted across restarts); the remote snapshot
+/// carries its own `exported_at`. Whichever side is newer wins wholesale — so a
+/// todo deleted locally is not resurrected from the older cloud copy, and items
+/// added on another device arrive when that device's sync is the newer side.
+///
+/// Ties and a missing remote (first sync) go to local.
+pub(crate) fn choose_authoritative(
+    local_last_modified: &str,
+    local: SyncSnapshot,
+    remote: Option<SyncSnapshot>,
+) -> SyncSnapshot {
+    match remote {
+        None => local,
+        Some(remote) => {
+            if local_last_modified >= remote.exported_at.as_str() {
+                local
+            } else {
+                remote
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AppSettings, TodoItem};
+
+    fn todo(id: &str) -> TodoItem {
+        TodoItem {
+            id: id.to_string(),
+            content: id.into(),
+            completed: false,
+            created_at: "2026-01-01T00:00:00".into(),
+            completed_at: None,
+            order: 0,
+            tag_id: None,
+            cat_id: None,
+            parent_id: None,
+            remind_at: None,
+        }
+    }
+
+    fn snap(ids: &[&str], exported_at: &str) -> SyncSnapshot {
+        SyncSnapshot {
+            version: 1,
+            exported_at: exported_at.to_string(),
+            todos: ids.iter().map(|id| todo(id)).collect(),
+            settings: AppSettings::default(),
+        }
+    }
+
+    #[test]
+    fn local_deletion_is_not_resurrected_when_local_is_newer() {
+        // Local deleted "b" (its data is newer); the cloud still has it. The
+        // newest version wins, so "b" must stay gone instead of being restored.
+        let local = snap(&["a"], "2026-01-03T00:00:00");
+        let remote = snap(&["a", "b"], "2026-01-02T00:00:00");
+        let chosen = choose_authoritative("2026-01-03T00:00:00", local, Some(remote));
+        let ids: Vec<_> = chosen.todos.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["a"]);
+    }
+
+    #[test]
+    fn newer_cloud_wins_and_restores_remote_data() {
+        // Another device synced last; its data (including a locally-missing
+        // item) is authoritative and should be pulled down.
+        let local = snap(&["a"], "2026-01-01T00:00:00");
+        let remote = snap(&["a", "c"], "2026-01-02T00:00:00");
+        let chosen = choose_authoritative("2026-01-01T00:00:00", local, Some(remote));
+        let ids: Vec<_> = chosen.todos.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn missing_remote_keeps_local() {
+        let local = snap(&["a"], "2026-01-03T00:00:00");
+        let chosen = choose_authoritative("2026-01-03T00:00:00", local, None);
+        assert_eq!(chosen.todos.len(), 1);
+    }
 }

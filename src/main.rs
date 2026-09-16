@@ -1,4 +1,5 @@
 mod app;
+mod app_assets;
 mod backup;
 mod http;
 mod label_dialogs;
@@ -7,6 +8,7 @@ mod types;
 mod webdav;
 
 use app::{DoitApp, DoitAppHandle};
+use app_assets::AppAssets;
 use gpui_kit::component::Root;
 use gpui_kit::gpui::{Bounds, SharedString, WindowBounds, WindowOptions, px};
 use gpui_kit::*;
@@ -19,7 +21,7 @@ fn main() {
 
     gpui_kit::application()
         .with_http_client(http_client)
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets::new())
         .run(move |cx| {
             gpui_kit::init(cx);
 
