@@ -68,6 +68,12 @@ cargo release --dry-run       # 只预览版本号与变更日志，不做任何
 | `doit-gpui-v0.1.1-windows-x64.zip` | Windows x64 |
 | `doit-gpui-v0.1.1-linux-x64.tar.gz` | Linux x64 |
 
+### macOS 使用提示
+
+- 应用未做 Apple 公证，首次打开会在 Gatekeeper 拦截：**右键 `Doit.app` → 打开**（或系统设置 → 隐私与安全性 → 仍要打开）。
+- 也可在终端移除隔离属性后正常双击：`xattr -dr com.apple.quarantine /Applications/Doit.app`
+- 安装包已做 **ad-hoc 签名**（解决 x86_64 版在 Apple Silicon 的 Rosetta 下报「应用已损坏」）；正式对外分发可再用 Apple 开发者证书签名并公证。
+
 ## 许可证
 
 MIT

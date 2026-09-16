@@ -47,15 +47,20 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Bundle .app and create DMG
+      - name: Bundle .app, sign and create DMG
         env:
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           APP="dist/Doit.app"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp "target/${{ matrix.target }}/release/doit-gpui" "$APP/Contents/MacOS/doit-gpui"
+          cp packaging/macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
           sed "s/@@VERSION@@/${VERSION#v}/" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+          chmod +x "$APP/Contents/MacOS/doit-gpui"
+          # Ad-hoc signature: required so unsigned x86_64 binaries launch under
+          # Rosetta / new macOS without "app is damaged" errors.
+          codesign --force --deep --sign - "$APP"
           hdiutil create -volname "Doit" -srcfolder "$APP" -ov -format UDZO \
             "dist/doit-gpui-${VERSION}-macos-${{ matrix.arch }}.dmg"
 

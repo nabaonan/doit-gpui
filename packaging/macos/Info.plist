@@ -10,12 +10,18 @@
   <string>com.nbn.doit-gpui</string>
   <key>CFBundleExecutable</key>
   <string>doit-gpui</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon.icns</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleVersion</key>
   <string>@@VERSION@@</string>
   <key>CFBundleShortVersionString</key>
   <string>@@VERSION@@</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.productivity</string>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
   <key>NSHighResolutionCapable</key>
