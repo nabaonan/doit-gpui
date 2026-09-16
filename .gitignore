@@ -30,3 +30,11 @@ target
 
 # logs & misc
 *.log
+
+# Local tooling / agent-skill environment (not app source)
+.codegraph/
+.hermes/
+.trae/
+.agents/
+.claude/
+skills-lock.json
