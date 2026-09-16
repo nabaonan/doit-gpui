@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.1.2] - 2026-09-16
+
+### 修复
+
+- fix(release): version release title and name artifacts with the version (fix 'vv0.1.1')
+
+
+
 ## [v0.1.1] - 2026-09-16
 
 ### 新增
