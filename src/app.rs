@@ -17,17 +17,19 @@ use gpui_kit::component::marker::Marker;
 use gpui_kit::component::Colorize;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::{
-    ActiveTheme, IconName, Root, Sizable, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt,
     button::Button,
     input::{Input, InputState, InputEvent},
     menu::{ContextMenuExt, PopupMenuItem},
 };
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
-    self, div, App, Hsla, Context, Entity, Global, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowAppearance, px,
-    ElementId,
+    self, div, AnyElement, App, Hsla, Context, Entity, Global, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    WindowAppearance, px, ElementId,
 };
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 // ── Global handle for context-menu callbacks ────────────────────────────────
 
@@ -95,6 +97,9 @@ fn category_select_items(cats: &[Category]) -> Vec<CategoryItem> {
 pub struct DoitApp {
     pub todos: Vec<TodoItem>,
     pub settings: AppSettings,
+    /// When the local data last changed (`%Y-%m-%dT%H:%M:%S`); used to decide
+    /// whether cloud sync may overwrite local data.
+    pub last_modified: String,
     next_id: u64,
 
     pub view_mode: ViewMode,
@@ -125,13 +130,21 @@ pub struct DoitApp {
     /// Tracks a pending long-press (row id, when it started).
     long_press: Option<(String, Instant)>,
 
+    /// Subtasks: parent ids whose children are currently collapsed in the today
+    /// view (in-memory only).
+    collapsed: HashSet<String>,
+
     _input_sub: Subscription,
     _calendar_sub: Subscription,
 }
 
 impl DoitApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = AppSettings::default();
+        // Restore the saved data if present; first run still seeds sample data.
+        // `last_modified` carries the saved data's "as of" time (or now on a
+        // fresh install) so sync keeps judging by the latest version.
+        let (seed_todos, settings, data_stamp) =
+            load_local_data().unwrap_or_else(|| (sample_todos(), AppSettings::default(), now_iso()));
 
         // Honor the self-signed certificate preference for WebDAV requests.
         crate::http::set_trust_self_signed(settings.cloud_sync.trust_self_signed);
@@ -197,9 +210,10 @@ impl DoitApp {
         });
 
         Self {
-            todos: sample_todos(),
+            next_id: next_todo_id(&seed_todos),
+            todos: seed_todos,
             settings,
-            next_id: 10,
+            last_modified: data_stamp,
             view_mode: ViewMode::Today,
             cat_filter: CatFilter::None,
             new_todo_input: input,
@@ -208,6 +222,7 @@ impl DoitApp {
             calendar_state,
             selected_cal_date: today.format("%Y-%m-%d").to_string(),
             long_press: None,
+            collapsed: HashSet::new(),
             _input_sub: input_sub,
             _calendar_sub: calendar_sub,
             stats_period: StatsPeriod::Month,
@@ -241,22 +256,85 @@ impl DoitApp {
             parent_id: None,
             remind_at: None,
         });
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
     fn toggle_todo(&mut self, id: &str, cx: &mut Context<Self>) {
+        // A parent's completion is derived from its subtasks — leave it alone.
+        let has_children = self
+            .todos
+            .iter()
+            .any(|t| t.parent_id.as_deref() == Some(id));
+        if has_children {
+            return;
+        }
         if let Some(item) = self.todos.iter_mut().find(|t| t.id == id) {
             item.completed = !item.completed;
             item.completed_at = if item.completed { Some(now_iso()) } else { None };
         }
+        sync_subtree_completion(&mut self.todos, &now_iso());
         self.resort();
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
     fn delete_todo(&mut self, id: &str, cx: &mut Context<Self>) {
-        let id_str = id.to_string();
-        self.todos.retain(|t| t.id != id_str);
+        // Deleting a parent also deletes its whole subtree (children have no
+        // hierarchy limit), and the parent of a deleted item may now be done.
+        let mut doomed = vec![id.to_string()];
+        let mut i = 0;
+        while i < doomed.len() {
+            let parent = doomed[i].clone();
+            self.todos
+                .iter()
+                .filter(|t| t.parent_id.as_deref() == Some(parent.as_str()))
+                .for_each(|c| doomed.push(c.id.clone()));
+            i += 1;
+        }
+        self.todos.retain(|t| !doomed.contains(&t.id));
+        for sid in &doomed {
+            self.collapsed.remove(sid);
+        }
+        sync_subtree_completion(&mut self.todos, &now_iso());
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
+    }
+
+    /// Add a subtask under `parent_id` and drop the user straight into inline
+    /// edit so they can name it. The child inherits the parent's tag/category
+    /// so it stays visible under the same category filter.
+    fn add_subtask(&mut self, parent_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(parent) = self.todos.iter().find(|t| t.id == parent_id) else {
+            return;
+        };
+        let siblings = self
+            .todos
+            .iter()
+            .filter(|t| t.parent_id.as_deref() == Some(parent_id))
+            .count() as u32;
+        let id = format!("t{}", self.next_id);
+        self.next_id += 1;
+        self.todos.push(TodoItem {
+            id: id.clone(),
+            content: "".into(),
+            completed: false,
+            created_at: now_iso(),
+            completed_at: None,
+            order: siblings,
+            tag_id: parent.tag_id.clone(),
+            cat_id: parent.cat_id.clone(),
+            parent_id: Some(parent_id.to_string()),
+            remind_at: None,
+        });
+        // A newly added incomplete child un-completes a finished parent.
+        sync_subtree_completion(&mut self.todos, &now_iso());
+        self.last_modified = now_iso();
+        self.save_local();
+        self.start_edit(&id, "", window, cx);
     }
 
     fn resort(&mut self) {
@@ -264,18 +342,24 @@ impl DoitApp {
             .sort_by(|a, b| a.completed.cmp(&b.completed).then(a.order.cmp(&b.order)));
     }
 
+    /// Expand/collapse a parent's subtasks in the today view.
+    fn toggle_collapse(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(id) {
+            self.collapsed.insert(id.to_string());
+        }
+        cx.notify();
+    }
+
     pub(crate) fn clear_all(&mut self, cx: &mut Context<Self>) {
         self.todos.clear();
+        self.collapsed.clear();
         self.settings.tags.clear();
         self.settings.categories.clear();
         self.settings.default_category_id = None;
         self.cat_filter = CatFilter::None;
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
-    }
-
-    /// Snapshot of all user data (used by the WebDAV backup panel).
-    pub(crate) fn snapshot_data(&self) -> (Vec<TodoItem>, AppSettings) {
-        (self.todos.clone(), self.settings.clone())
     }
 
     /// Restore a downloaded snapshot, re-applying the theme it carries.
@@ -288,6 +372,12 @@ impl DoitApp {
         self.todos = snap.todos;
         self.resort();
         self.settings = snap.settings;
+        sync_subtree_completion(&mut self.todos, &now_iso());
+        // Drop collapse state for parents that no longer exist.
+        self.collapsed.retain(|id| self.todos.iter().any(|t| t.id == *id));
+        // Adopt the remote's stamp: until the user edits again, local data
+        // matches the cloud, so a follow-up sync won't keep warning.
+        self.last_modified = snap.exported_at;
         let mode = initial_theme(&self.settings, window);
         Theme::change(mode, Some(window), cx);
         if let CatFilter::Id(ref id) = self.cat_filter {
@@ -295,7 +385,22 @@ impl DoitApp {
                 self.cat_filter = CatFilter::None;
             }
         }
+        self.save_local();
         cx.notify();
+    }
+
+    /// Persist the current data to the local snapshot file so a restart
+    /// restores it instead of re-seeding sample data. The stamp mirrors
+    /// `last_modified` (when this machine's data last changed), so a restart
+    /// keeps the authoritative "as of" time for the next sync decision.
+    pub(crate) fn save_local(&self) {
+        let snap = SyncSnapshot {
+            version: 1,
+            exported_at: self.last_modified.clone(),
+            todos: self.todos.clone(),
+            settings: self.settings.clone(),
+        };
+        write_snapshot_at(&snap, &local_data_path());
     }
 
     /// Replace categories + default id (from the category management dialog).
@@ -316,12 +421,16 @@ impl DoitApp {
                 self.cat_filter = CatFilter::None;
             }
         }
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
     /// Replace tags (from the tag management dialog).
     pub(crate) fn set_tags(&mut self, tags: Vec<Tag>, cx: &mut Context<Self>) {
         self.settings.tags = tags;
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
@@ -335,6 +444,8 @@ impl DoitApp {
         if let Some(item) = self.todos.iter_mut().find(|t| t.id == id) {
             item.tag_id = tag_id;
         }
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
@@ -348,6 +459,8 @@ impl DoitApp {
         if let Some(item) = self.todos.iter_mut().find(|t| t.id == id) {
             item.cat_id = cat_id;
         }
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
@@ -376,6 +489,8 @@ impl DoitApp {
                 }
             }
         }
+        self.last_modified = now_iso();
+        self.save_local();
         cx.notify();
     }
 
@@ -515,7 +630,7 @@ impl DoitApp {
                     .child(
                         Button::new("backup-btn")
                             .ghost()
-                            .icon(IconName::HardDrive)
+                            .icon(Icon::empty().path("icons/cloud.svg"))
                             .small()
                             .tooltip("云备份")
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -603,6 +718,9 @@ impl DoitApp {
 
 // ── Today View ──────────────────────────────────────────────────────────────
 
+/// Extra left padding per nesting level a subtask is rendered below its parent.
+const SUBTASK_INDENT: f32 = 16.;
+
 impl DoitApp {
     fn render_today(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active_todos();
@@ -618,10 +736,7 @@ impl DoitApp {
                 div()
                     .v_flex()
                     .gap_1()
-                    .children(active.iter().map(|todo| {
-                        self.render_todo_row(todo, &tags, is_longpress, window, cx)
-                            .into_any_element()
-                    })),
+                    .children(self.render_todo_forest(&active, &tags, is_longpress, window, cx)),
             )
             .when(active.is_empty(), |el| {
                 el.child(
@@ -634,6 +749,66 @@ impl DoitApp {
                         .child("还没有待办事项，在上方输入添加"),
                 )
             })
+    }
+
+    /// Render the active todos as a nested tree (subtasks under parents, any
+    /// depth). Rows whose parent is not in the visible set render as roots.
+    fn render_todo_forest(
+        &mut self,
+        items: &[TodoItem],
+        tags: &[Tag],
+        is_longpress: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        items
+            .iter()
+            .filter(|t| match &t.parent_id {
+                None => true,
+                Some(pid) => !items.iter().any(|o| o.id == *pid),
+            })
+            .map(|root| {
+                self.render_todo_node(root, items, tags, is_longpress, 0, window, cx)
+            })
+            .collect()
+    }
+
+    fn render_todo_node(
+        &mut self,
+        todo: &TodoItem,
+        all: &[TodoItem],
+        tags: &[Tag],
+        is_longpress: bool,
+        depth: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let children = child_ids_of(all, &todo.id);
+        // Affordances are driven by ALL todos, not just the visible set: a
+        // parent whose subtasks are today-hidden must still stay non-toggleable.
+        let has_children = !child_ids_of(&self.todos, &todo.id).is_empty();
+        let collapsed = self.collapsed.contains(&todo.id);
+        let row = self
+            .render_todo_row(
+                todo,
+                tags,
+                is_longpress,
+                depth,
+                has_children,
+                collapsed,
+                window,
+                cx,
+            )
+            .into_any_element();
+        div()
+            .v_flex()
+            .child(row)
+            .when(!collapsed, |el| {
+                el.children(children.into_iter().map(|child| {
+                    self.render_todo_node(child, all, tags, is_longpress, depth + 1, window, cx)
+                }))
+            })
+            .into_any_element()
     }
 
     fn render_input_row(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -681,6 +856,9 @@ impl DoitApp {
         todo: &TodoItem,
         tags: &[Tag],
         is_longpress: bool,
+        depth: usize,
+        has_children: bool,
+        collapsed: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -703,6 +881,9 @@ impl DoitApp {
             .px(px(12.))
             .py(px(8.))
             .rounded_lg()
+            // Nest subtasks under their parent: additive on top of the base
+            // 12px padding, one extra indent step per depth (16px/level).
+            .when(depth > 0, |el| el.pl(px(12. + SUBTASK_INDENT * depth as f32)))
             .hover(|s| s.bg(cx.theme().muted))
             .when(is_longpress, |el| {
                 let id_down = id.clone();
@@ -769,6 +950,21 @@ impl DoitApp {
                                                 window,
                                                 cx,
                                             );
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("添加子任务")
+                            .icon(IconName::Plus)
+                            .on_click({
+                                let id_for_menu = id_for_menu.clone();
+                                move |_, window, cx| {
+                                    if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                        let app = handle.0.clone();
+                                        app.update(cx, |app, cx| {
+                                            app.add_subtask(&id_for_menu, window, cx);
                                         });
                                     }
                                 }
@@ -913,6 +1109,32 @@ impl DoitApp {
                 }
             })
             .child(
+                // Collapse toggle for parents with subtasks; spacer otherwise.
+                if has_children {
+                    Button::new(ElementId::Name(format!("chev-{}", &id).into()))
+                        .ghost()
+                        .icon(Icon::empty().path(if collapsed {
+                            "icons/chevron-right.svg"
+                        } else {
+                            "icons/chevron-down.svg"
+                        }))
+                        .size_5()
+                        .tooltip(if collapsed { "展开子任务" } else { "收起子任务" })
+                        .on_click({
+                            let cid = id.clone();
+                            move |_, _, cx| {
+                                if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                    let app = handle.0.clone();
+                                    app.update(cx, |app, cx| app.toggle_collapse(&cid, cx));
+                                }
+                            }
+                        })
+                        .into_any_element()
+                } else {
+                    div().size_5().flex_none().into_any_element()
+                },
+            )
+            .child(
                 if is_longpress {
                     div()
                         .size_4()
@@ -933,6 +1155,8 @@ impl DoitApp {
                 } else {
                     Checkbox::new(ElementId::Name(format!("chk-{}", &id).into()))
                         .checked(completed)
+                        // A parent's completion is derived from its subtasks.
+                        .disabled(has_children)
                         .on_click({
                             let id = id.clone();
                             move |_, _, cx| {
@@ -1596,10 +1820,96 @@ fn color_dot(color: &str, _cx: &gpui_kit::gpui::App) -> impl IntoElement {
         .into_any_element()
 }
 
+/// The next `t{n}` id, one past the largest persisted numeric id (sample ids
+/// like `demo-1` don't match, so a fresh install still starts at 10).
+fn next_todo_id(todos: &[TodoItem]) -> u64 {
+    todos
+        .iter()
+        .filter_map(|t| t.id.strip_prefix('t')?.parse::<u64>().ok())
+        .max()
+        .map_or(10, |max| max + 1)
+}
+
+/// Reconcile subtask completion bottom-up: a todo that has children is complete
+/// iff **all** its direct children are complete, at any nesting depth. Leaves
+/// keep whatever the user set; parents are purely derived from their children.
+///
+/// Fixed-point loop, bounded by the number of rows so a malformed parent cycle
+/// in loaded data can never spin forever.
+fn sync_subtree_completion(todos: &mut Vec<TodoItem>, stamp: &str) {
+    for _ in 0..=todos.len() {
+        let mut changed = false;
+        for i in 0..todos.len() {
+            let parent_id = todos[i].id.clone();
+            let children_done: Vec<bool> = todos
+                .iter()
+                .filter(|t| t.parent_id.as_deref() == Some(parent_id.as_str()))
+                .map(|t| t.completed)
+                .collect();
+            if children_done.is_empty() {
+                continue;
+            }
+            let all_done = children_done.iter().all(|done| *done);
+            let item = &mut todos[i];
+            if item.completed != all_done {
+                item.completed = all_done;
+                item.completed_at = if all_done {
+                    Some(stamp.to_string())
+                } else {
+                    None
+                };
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Direct children of `parent_id` in the given item set.
+fn child_ids_of<'a>(items: &'a [TodoItem], parent_id: &str) -> Vec<&'a TodoItem> {
+    items
+        .iter()
+        .filter(|t| t.parent_id.as_deref() == Some(parent_id))
+        .collect()
+}
+
 // ── Time / demo helpers ─────────────────────────────────────────────────────
 
 fn now_iso() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+// ── Local persistence ────────────────────────────────────────────────────────
+
+/// Where the app stores its local snapshot so data survives restarts.
+fn local_data_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".doit-gpui").join("snapshot.json")
+}
+
+/// Load the previously-saved local snapshot, if any, returning the data plus
+/// the snapshot's own "as of" stamp for `last_modified`.
+fn load_local_data() -> Option<(Vec<TodoItem>, AppSettings, String)> {
+    let snap = read_snapshot_at(&local_data_path())?;
+    (snap.version == 1).then(|| (snap.todos, snap.settings, snap.exported_at))
+}
+
+fn write_snapshot_at(snap: &SyncSnapshot, path: &Path) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string(snap) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn read_snapshot_at(path: &Path) -> Option<SyncSnapshot> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn date_part(iso: &str) -> String {
@@ -1737,5 +2047,144 @@ fn initial_theme(settings: &AppSettings, window: &Window) -> ThemeMode {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
             _ => ThemeMode::Light,
         },
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn local_snapshot_round_trip() {
+        let path = std::env::temp_dir()
+            .join(format!("doit-gpui-persist-test-{}.json", std::process::id()));
+        let mut settings = AppSettings::default();
+        settings.tags.push(Tag {
+            id: "t9".into(),
+            name: "测试".into(),
+            color: "#123456".into(),
+        });
+        let snap = SyncSnapshot {
+            version: 1,
+            exported_at: "2026-09-16T12:00:00".into(),
+            todos: vec![TodoItem {
+                id: "t1".into(),
+                content: "持久化测试".into(),
+                completed: true,
+                created_at: "2026-09-16T10:00:00".into(),
+                completed_at: Some("2026-09-16T11:00:00".into()),
+                order: 0,
+                tag_id: None,
+                cat_id: None,
+                parent_id: None,
+                remind_at: None,
+            }],
+            settings,
+        };
+
+        write_snapshot_at(&snap, &path);
+        let loaded = read_snapshot_at(&path).expect("saved snapshot should load");
+        assert_eq!(loaded.todos.len(), 1);
+        assert_eq!(loaded.todos[0].content, "持久化测试");
+        assert!(loaded.todos[0].completed);
+        assert_eq!(loaded.settings.tags.len(), 3, "default tags + the added one");
+        assert_eq!(loaded.exported_at, "2026-09-16T12:00:00");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod subtree_tests {
+    use super::*;
+
+    fn node(id: &str, parent: Option<&str>, completed: bool) -> TodoItem {
+        TodoItem {
+            id: id.to_string(),
+            content: id.into(),
+            completed,
+            created_at: "2026-09-16T10:00:00".into(),
+            completed_at: if completed { Some("2026-09-16T11:00:00".into()) } else { None },
+            order: 0,
+            tag_id: None,
+            cat_id: None,
+            parent_id: parent.map(|p| p.to_string()),
+            remind_at: None,
+        }
+    }
+
+    fn completed_of(todos: &[TodoItem], id: &str) -> bool {
+        todos.iter().find(|t| t.id == id).unwrap().completed
+    }
+
+    #[test]
+    fn parent_is_incomplete_until_all_children_done() {
+        let mut todos = vec![
+            node("p", None, true),
+            node("a", Some("p"), false),
+            node("b", Some("p"), true),
+        ];
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        assert!(!completed_of(&todos, "p"), "one child unfinished");
+        todos[1].completed = true;
+        todos[1].completed_at = Some("2026-09-16T12:00:00".into());
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        assert!(completed_of(&todos, "p"), "all children done");
+        assert_eq!(
+            todos.iter().find(|t| t.id == "p").unwrap().completed_at.as_deref(),
+            Some("2026-09-16T12:00:00"),
+            "parent gains a completion stamp"
+        );
+    }
+
+    #[test]
+    fn uncompleting_a_child_uncompletes_the_parent() {
+        let mut todos = vec![
+            node("p", None, true),
+            node("a", Some("p"), true),
+            node("b", Some("p"), true),
+        ];
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        assert!(completed_of(&todos, "p"));
+        todos[2].completed = false;
+        todos[2].completed_at = None;
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        assert!(!completed_of(&todos, "p"));
+        assert!(todos.iter().find(|t| t.id == "p").unwrap().completed_at.is_none());
+    }
+
+    #[test]
+    fn completion_propagates_through_any_depth() {
+        let mut todos = vec![
+            node("gp", None, false),
+            node("p", Some("gp"), false),
+            node("a", Some("p"), false),
+        ];
+        todos[2].completed = true;
+        todos[2].completed_at = Some("2026-09-16T12:00:00".into());
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        assert!(completed_of(&todos, "p"));
+        assert!(completed_of(&todos, "gp"));
+    }
+
+    #[test]
+    fn leaves_keep_their_own_state() {
+        let mut todos = vec![
+            node("leaf", None, false),
+            node("done-leaf", None, true),
+            node("p", Some("leaf"), false), // "leaf" becomes a parent
+            node("c", Some("leaf"), true),
+        ];
+        // "leaf" now has one child; it should derive (child done → incomplete)
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        assert!(!completed_of(&todos, "leaf"));
+        assert!(completed_of(&todos, "done-leaf"), "parentless leaf untouched");
+    }
+
+    #[test]
+    fn malformed_cycle_terminates() {
+        // A->B->A parent cycle must not hang the fixed-point loop.
+        let mut todos = vec![node("a", Some("b"), false), node("b", Some("a"), false)];
+        sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
+        let _ = todos;
     }
 }
