@@ -2,12 +2,13 @@
 # auto-generated changelog.
 #
 # Triggered by pushing a version tag (e.g. `git push origin v0.1.1`), which the
-# `scripts/release.sh` command does for you. Artifacts (different architectures
-# are separate packages, distinguished by name):
-#   - macOS Apple Silicon, .dmg   -> doit-gpui-macos-arm64.dmg
-#   - macOS Intel x64,      .dmg  -> doit-gpui-macos-x64.dmg
-#   - Windows x64 (.exe),   .zip  -> doit-gpui-windows-x64.zip
-#   - Linux x64,            .tar.gz -> doit-gpui-linux-x64.tar.gz
+# `scripts/release.sh` command does for you. Artifacts are named with the
+# version, and different architectures are separate packages distinguished by
+# name (e.g. tag v0.1.1):
+#   - macOS Apple Silicon, .dmg          -> doit-gpui-v0.1.1-macos-arm64.dmg
+#   - macOS Intel x64,      .dmg         -> doit-gpui-v0.1.1-macos-x64.dmg
+#   - Windows x64 (.exe),   .zip         -> doit-gpui-v0.1.1-windows-x64.zip
+#   - Linux x64,            .tar.gz      -> doit-gpui-v0.1.1-linux-x64.tar.gz
 
 name: release
 
@@ -56,12 +57,12 @@ jobs:
           cp "target/${{ matrix.target }}/release/doit-gpui" "$APP/Contents/MacOS/doit-gpui"
           sed "s/@@VERSION@@/${VERSION#v}/" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
           hdiutil create -volname "Doit" -srcfolder "$APP" -ov -format UDZO \
-            "dist/doit-gpui-macos-${{ matrix.arch }}.dmg"
+            "dist/doit-gpui-${VERSION}-macos-${{ matrix.arch }}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
-          path: dist/doit-gpui-macos-${{ matrix.arch }}.dmg
+          path: dist/doit-gpui-${{ github.ref_name }}-macos-${{ matrix.arch }}.dmg
 
   windows:
     name: Windows x64
@@ -79,14 +80,15 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
+          $ver = $env:GITHUB_REF_NAME
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/doit-gpui.exe" "dist/doit-gpui-windows-x64.exe"
-          Compress-Archive -Path "dist/doit-gpui-windows-x64.exe" -DestinationPath "dist/doit-gpui-windows-x64.zip" -Force
+          Copy-Item "target/x86_64-pc-windows-msvc/release/doit-gpui.exe" "dist/doit-gpui-$ver-windows-x64.exe"
+          Compress-Archive -Path "dist/doit-gpui-$ver-windows-x64.exe" -DestinationPath "dist/doit-gpui-$ver-windows-x64.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: dist/doit-gpui-windows-x64.zip
+          path: dist/doit-gpui-${{ github.ref_name }}-windows-x64.zip
 
   linux:
     name: Linux x64
@@ -116,15 +118,16 @@ jobs:
 
       - name: Package
         run: |
+          VERSION="${GITHUB_REF_NAME}"
           mkdir -p dist
           cp "target/x86_64-unknown-linux-gnu/release/doit-gpui" dist/
           cp LICENSE dist/LICENSE
-          tar czf dist/doit-gpui-linux-x64.tar.gz -C dist doit-gpui LICENSE
+          tar czf "dist/doit-gpui-${VERSION}-linux-x64.tar.gz" -C dist doit-gpui LICENSE
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
-          path: dist/doit-gpui-linux-x64.tar.gz
+          path: dist/doit-gpui-${{ github.ref_name }}-linux-x64.tar.gz
 
   release:
     name: Publish GitHub Release
@@ -157,10 +160,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           body_path: release-body.md
           files: |
-            artifacts/macos-arm64/doit-gpui-macos-arm64.dmg
-            artifacts/macos-x64/doit-gpui-macos-x64.dmg
-            artifacts/windows-x64/doit-gpui-windows-x64.zip
-            artifacts/linux-x64/doit-gpui-linux-x64.tar.gz
+            artifacts/macos-arm64/doit-gpui-${{ github.ref_name }}-macos-arm64.dmg
+            artifacts/macos-x64/doit-gpui-${{ github.ref_name }}-macos-x64.dmg
+            artifacts/windows-x64/doit-gpui-${{ github.ref_name }}-windows-x64.zip
+            artifacts/linux-x64/doit-gpui-${{ github.ref_name }}-linux-x64.tar.gz

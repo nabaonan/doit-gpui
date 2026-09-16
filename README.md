@@ -61,12 +61,12 @@ cargo release --dry-run       # 只预览版本号与变更日志，不做任何
 
 ## 平台产物
 
-| Release 附件 | 覆盖平台 |
+| Release 附件（含版本号，示例 v0.1.1） | 覆盖平台 |
 | --- | --- |
-| `doit-gpui-macos-arm64.dmg` | macOS Apple Silicon（arm64） |
-| `doit-gpui-macos-x64.dmg` | macOS Intel（x86_64） |
-| `doit-gpui-windows-x64.zip` | Windows x64 |
-| `doit-gpui-linux-x64.tar.gz` | Linux x64 |
+| `doit-gpui-v0.1.1-macos-arm64.dmg` | macOS Apple Silicon（arm64） |
+| `doit-gpui-v0.1.1-macos-x64.dmg` | macOS Intel（x86_64） |
+| `doit-gpui-v0.1.1-windows-x64.zip` | Windows x64 |
+| `doit-gpui-v0.1.1-linux-x64.tar.gz` | Linux x64 |
 
 ## 许可证
 
