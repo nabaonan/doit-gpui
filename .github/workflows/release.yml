@@ -2,10 +2,12 @@
 # auto-generated changelog.
 #
 # Triggered by pushing a version tag (e.g. `git push origin v0.1.1`), which the
-# `scripts/release.sh` command does for you. Artifacts:
-#   - macOS universal binary (Apple Silicon + Intel), .tar.gz
-#   - Windows x64 (.exe), .zip
-#   - Linux x64, .tar.gz
+# `scripts/release.sh` command does for you. Artifacts (different architectures
+# are separate packages, distinguished by name):
+#   - macOS Apple Silicon, .dmg   -> doit-gpui-macos-arm64.dmg
+#   - macOS Intel x64,      .dmg  -> doit-gpui-macos-x64.dmg
+#   - Windows x64 (.exe),   .zip  -> doit-gpui-windows-x64.zip
+#   - Linux x64,            .tar.gz -> doit-gpui-linux-x64.tar.gz
 
 name: release
 
@@ -24,8 +26,16 @@ concurrency:
 
 jobs:
   macos:
-    name: 'macOS (universal: arm64 + x64)'
+    name: macOS DMG (${{ matrix.arch }})
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x64
     steps:
       - uses: actions/checkout@v4
 
@@ -33,26 +43,25 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Build arm64
-        run: cargo build --release --target aarch64-apple-darwin
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build x86_64
-        run: cargo build --release --target x86_64-apple-darwin
-
-      - name: Lipo into universal binary
+      - name: Bundle .app and create DMG
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          mkdir -p dist
-          lipo -create \
-            "target/aarch64-apple-darwin/release/doit-gpui" \
-            "target/x86_64-apple-darwin/release/doit-gpui" \
-            -output "dist/doit-gpui-macos-universal"
-          cp LICENSE dist/LICENSE
-          tar czf dist/doit-gpui-macos-universal.tar.gz -C dist doit-gpui-macos-universal LICENSE
+          set -euo pipefail
+          APP="dist/Doit.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp "target/${{ matrix.target }}/release/doit-gpui" "$APP/Contents/MacOS/doit-gpui"
+          sed "s/@@VERSION@@/${VERSION#v}/" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+          hdiutil create -volname "Doit" -srcfolder "$APP" -ov -format UDZO \
+            "dist/doit-gpui-macos-${{ matrix.arch }}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
-          path: dist/doit-gpui-macos-universal.tar.gz
+          name: macos-${{ matrix.arch }}
+          path: dist/doit-gpui-macos-${{ matrix.arch }}.dmg
 
   windows:
     name: Windows x64
@@ -134,7 +143,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           {
-            echo "**平台**：macOS（Apple Silicon + Intel 通用二进制）、Windows x64、Linux x64"
+            echo "**平台**：macOS（Apple Silicon DMG + Intel DMG）、Windows x64、Linux x64"
             echo
             awk -v sec="## [v${VERSION}]" '
               $0 ~ /^## \[/ { if (seen) exit; if (index($0, sec) != 0) { seen=1; next } }
@@ -151,6 +160,7 @@ jobs:
           name: v${{ github.ref_name }}
           body_path: release-body.md
           files: |
-            artifacts/macos-universal/doit-gpui-macos-universal.tar.gz
+            artifacts/macos-arm64/doit-gpui-macos-arm64.dmg
+            artifacts/macos-x64/doit-gpui-macos-x64.dmg
             artifacts/windows-x64/doit-gpui-windows-x64.zip
             artifacts/linux-x64/doit-gpui-linux-x64.tar.gz
