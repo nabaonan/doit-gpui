@@ -2,12 +2,12 @@
 #
 # Release Doit GPUI: bump the version, generate the changelog, tag and push.
 #
-# Usage:
-#   ./scripts/release.sh                 # bump patch  (0.1.0 -> 0.1.1)
-#   ./scripts/release.sh minor           # bump minor  (0.1.0 -> 0.2.0)
-#   ./scripts/release.sh major           # bump major  (0.1.0 -> 1.0.0)
-#   ./scripts/release.sh 1.2.3           # set an explicit version
-#   ./scripts/release.sh --dry-run       # preview everything, change nothing
+# Usage (either form; `cargo release` needs the one-time symlink, see README):
+#   cargo release                # bump patch  (0.1.0 -> 0.1.1), tag, push
+#   ./scripts/release.sh minor   # bump minor  (0.1.0 -> 0.2.0)
+#   cargo release major          # bump major  (0.1.0 -> 1.0.0)
+#   ./scripts/release.sh 1.2.3   # set an explicit version
+#   cargo release --dry-run      # preview everything, change nothing
 #
 # What it does:
 #   1. bump the version in Cargo.toml / Cargo.lock
@@ -22,7 +22,18 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# Enter the repository root. Works when run as `./scripts/release.sh` OR via a
+# symlinked `cargo-release` on PATH (cargo external subcommand), because
+# `realpath` resolves the symlink back to this file.
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+# When invoked by cargo as an external subcommand (`cargo release ...`), cargo
+# prepends the subcommand name as the first argument (`cargo release --dry-run`
+# arrives as `["release", "--dry-run"]`); drop it.
+if [ -n "${CARGO:-}" ] && [ "$#" -gt 0 ]; then
+  shift
+fi
 
 DRY_RUN=0
 BUMP="patch"

@@ -26,15 +26,29 @@ cargo run --release  # 发布构建
 ## 发版
 
 发版指令 = **打 tag 推远端，由 GitHub Actions 构建并发布**，本地不做任何构建/运行。
-`./scripts/release.sh` 只做四件事：自动递增版本号 → 生成变更日志 → `cargo check` 自检 → commit + tag + push；
-tag 推送即触发 `.github/workflows/release.yml`，自动构建四个平台产物并发布 Release（含变更日志）：
+`release.sh` 只做四件事：自动递增版本号 → 生成变更日志 → `cargo check` 自检 → commit + tag + push；
+tag 推送即触发 `.github/workflows/release.yml`，自动构建四个平台产物并发布 Release（含变更日志）。
+
+**精简指令（二选一）：**
 
 ```bash
-./scripts/release.sh           # 自动 +1 patch（0.1.0 -> 0.1.1），打 v0.1.1 并推送
-./scripts/release.sh minor     # +1 minor
-./scripts/release.sh major     # +1 major
-./scripts/release.sh 1.2.3     # 指定具体版本
-./scripts/release.sh --dry-run # 只预览版本号与变更日志，不做任何修改
+cargo release                 # 已配好 PATH 链接，直接在仓库根执行
+./scripts/release.sh          # 或直接用仓库内脚本
+```
+
+可选参数：`minor` / `major` / `x.y.z` / `--dry-run`（只预览不修改）。
+首次使用 `cargo release` 前，先建立链接（一次性）：
+
+```bash
+ln -sfn "$(pwd)/scripts/release.sh" ~/.cargo/bin/cargo-release
+```
+
+示例：
+
+```bash
+cargo release                 # 0.1.0 -> 0.1.1，打 v0.1.1 并推送
+cargo release minor           # 0.1.0 -> 0.2.0
+cargo release --dry-run       # 只预览版本号与变更日志，不做任何修改
 ```
 
 流程：
