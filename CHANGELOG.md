@@ -1,0 +1,5 @@
+# Changelog
+
+所有显著变更都会记录在此文件中。
+
+本文件的每个 `## [vX.Y.Z] - 日期` 章节由 `scripts/release.sh` 自动生成（依据自上个 tag 以来的提交），并被 GitHub Actions 用作对应 Release 的说明。

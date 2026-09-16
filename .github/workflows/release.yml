@@ -1,0 +1,156 @@
+# Build Doit GPUI for every platform and publish a GitHub Release with an
+# auto-generated changelog.
+#
+# Triggered by pushing a version tag (e.g. `git push origin v0.1.1`), which the
+# `scripts/release.sh` command does for you. Artifacts:
+#   - macOS universal binary (Apple Silicon + Intel), .tar.gz
+#   - Windows x64 (.exe), .zip
+#   - Linux x64, .tar.gz
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: 'macOS (universal: arm64 + x64)'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build arm64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Lipo into universal binary
+        run: |
+          mkdir -p dist
+          lipo -create \
+            "target/aarch64-apple-darwin/release/doit-gpui" \
+            "target/x86_64-apple-darwin/release/doit-gpui" \
+            -output "dist/doit-gpui-macos-universal"
+          cp LICENSE dist/LICENSE
+          tar czf dist/doit-gpui-macos-universal.tar.gz -C dist doit-gpui-macos-universal LICENSE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/doit-gpui-macos-universal.tar.gz
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/doit-gpui.exe" "dist/doit-gpui-windows-x64.exe"
+          Compress-Archive -Path "dist/doit-gpui-windows-x64.exe" -DestinationPath "dist/doit-gpui-windows-x64.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/doit-gpui-windows-x64.zip
+
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libssl-dev libfontconfig1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libgtk-3-dev libasound2-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev \
+            libdbus-1-dev
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp "target/x86_64-unknown-linux-gnu/release/doit-gpui" dist/
+          cp LICENSE dist/LICENSE
+          tar czf dist/doit-gpui-linux-x64.tar.gz -C dist doit-gpui LICENSE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/doit-gpui-linux-x64.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release body from changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          {
+            echo "**平台**：macOS（Apple Silicon + Intel 通用二进制）、Windows x64、Linux x64"
+            echo
+            awk -v sec="## [v${VERSION}]" '
+              $0 ~ /^## \[/ { if (seen) exit; if (index($0, sec) != 0) { seen=1; next } }
+              seen { print }
+            ' CHANGELOG.md
+          } > release-body.md
+          if [ ! -s release-body.md ]; then
+            echo "（本版本暂无面向用户的变更）" > release-body.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ github.ref_name }}
+          body_path: release-body.md
+          files: |
+            artifacts/macos-universal/doit-gpui-macos-universal.tar.gz
+            artifacts/windows-x64/doit-gpui-windows-x64.zip
+            artifacts/linux-x64/doit-gpui-linux-x64.tar.gz
