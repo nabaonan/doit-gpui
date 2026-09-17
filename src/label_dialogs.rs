@@ -32,6 +32,24 @@ fn color_from_hex(hex: &str) -> Hsla {
     Colorize::parse_hex(hex).unwrap_or_else(|_| Hsla::blue())
 }
 
+/// Quick-pick palette the official `ColorPicker` shows above its built-in
+/// swatches.
+///
+/// The official component derives every swatch's `ElementId` from the colour's
+/// hex, and its *default* featured colours (the theme red/blue/green/accent
+/// tones) all duplicate hexes in its built-in palettes. With accessibility
+/// active, opening the popover therefore builds two identical a11y node ids and
+/// panics ("Duplicate a11y node id"). Fix: pass our own featured set that is
+/// disjoint from the component's 9 built-in palettes (stone/red/orange/yellow/
+/// green/cyan/blue/purple/pink) — the app's brand colours those palettes do not
+/// already list. Everything else is reachable from the built-in palettes below.
+fn picker_featured_colors() -> Vec<Hsla> {
+    ["#F59E0B", "#84CC16", "#14B8A6", "#6366F1", "#D946EF"]
+        .iter()
+        .map(|hex| color_from_hex(hex))
+        .collect()
+}
+
 // ── Category management panel ───────────────────────────────────────────────
 
 pub struct CategoriesPanel {
@@ -300,7 +318,11 @@ impl Render for CategoriesPanel {
                                         Input::new(&edit_name).small().flex_1(),
                                     ),
                                 )
-                                .child(ColorPicker::new(&edit_color).small())
+                                .child(
+                                    ColorPicker::new(&edit_color)
+                                        .featured_colors(picker_featured_colors())
+                                        .small(),
+                                )
                                 .child(
                                     Button::new(ElementId::Name(format!("cat-save-{id}").into()))
                                         .small()
@@ -368,7 +390,11 @@ impl Render for CategoriesPanel {
                                 );
                         } else {
                             row = row
-                                .child(ColorPicker::new(&row_picker).small())
+                                .child(
+                                    ColorPicker::new(&row_picker)
+                                        .featured_colors(picker_featured_colors())
+                                        .small(),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -479,7 +505,11 @@ impl Render for CategoriesPanel {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(ColorPicker::new(&new_color_picker).small())
+                    .child(
+                        ColorPicker::new(&new_color_picker)
+                            .featured_colors(picker_featured_colors())
+                            .small(),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -786,7 +816,11 @@ impl Render for TagsPanel {
                                         Input::new(&edit_name).small().flex_1(),
                                     ),
                                 )
-                                .child(ColorPicker::new(&edit_color).small())
+                                .child(
+                                    ColorPicker::new(&edit_color)
+                                        .featured_colors(picker_featured_colors())
+                                        .small(),
+                                )
                                 .child(
                                     Button::new(ElementId::Name(format!("tag-save-{id}").into()))
                                         .small()
@@ -851,7 +885,11 @@ impl Render for TagsPanel {
                                 );
                         } else {
                             row = row
-                                .child(ColorPicker::new(&row_picker).small())
+                                .child(
+                                    ColorPicker::new(&row_picker)
+                                        .featured_colors(picker_featured_colors())
+                                        .small(),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -931,7 +969,11 @@ impl Render for TagsPanel {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(ColorPicker::new(&new_color_picker).small())
+                    .child(
+                        ColorPicker::new(&new_color_picker)
+                            .featured_colors(picker_featured_colors())
+                            .small(),
+                    )
                     .child(
                         div()
                             .flex_1()
