@@ -9,6 +9,7 @@ use gpui_kit::component::{
     button::Button,
     input::{Input, InputState, InputEvent},
     kbd::Kbd,
+    notification::Notification,
     radio::RadioGroup,
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
@@ -17,8 +18,8 @@ use gpui_kit::prelude::*;
 use std::sync::Arc;
 use gpui_kit::gpui::{
     div, App, Context, Entity, FocusHandle,
-    IntoElement, KeyDownEvent, Keystroke, Modifiers, ParentElement, Render, SharedString, Styled,
-    Subscription, Window, px, ElementId,
+    IntoElement, KeyDownEvent, Keystroke, Modifiers, ParentElement, PathPromptOptions, Render,
+    SharedString, Styled, Subscription, Window, px, ElementId,
 };
 use crate::app::DoitAppHandle;
 use crate::label_dialogs::{CategoriesPanel, TagsPanel};
@@ -206,6 +207,23 @@ impl SettingsPanel {
         });
     }
 
+    /// Rebuild the working copy plus the category/tag panels after an import
+    /// replaced the application data, so the dialog reflects the new data.
+    fn reload_after_import(&mut self, settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_from(settings, window, cx);
+        self.categories_panel = cx.new(|cx| {
+            CategoriesPanel::new(
+                self.local.categories.clone(),
+                self.local.default_category_id.clone(),
+                false,
+                window,
+                cx,
+            )
+        });
+        self.tags_panel = cx.new(|cx| TagsPanel::new(self.local.tags.clone(), false, window, cx));
+        cx.notify();
+    }
+
     /// Mirror the working copy into the application's settings entity.
     fn push_settings(&mut self, cx: &mut Context<Self>) {
         let app = cx
@@ -342,11 +360,6 @@ impl SettingsPanel {
             "dark" => Some(2),
             _ => Some(0),
         };
-        let font_ix = if self.local.font_family.as_ref() == "cartoon" {
-            Some(1)
-        } else {
-            Some(0)
-        };
 
         div()
             .v_flex()
@@ -368,45 +381,6 @@ impl SettingsPanel {
                                         _ => "system".into(),
                                     };
                                     p.apply_theme(window, cx);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
-            )
-            .child(
-                section_block("字体", cx).child(
-                    RadioGroup::horizontal("font-radios")
-                        .selected_index(font_ix)
-                        .child("系统默认")
-                        .child("卡通")
-                        .on_click({
-                            let entity = cx.entity();
-                            move |ix, _window, cx| {
-                                entity.update(cx, |p, cx| {
-                                    p.local.font_family = if *ix == 1 {
-                                        "cartoon".into()
-                                    } else {
-                                        "default".into()
-                                    };
-                                    p.push_settings(cx);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
-            )
-            .child(
-                row_block("快乐工作", "点击组件时有彩色圆点动画", cx).child(
-                    Switch::new("happy-mode")
-                        .small()
-                        .checked(self.local.happy_mode)
-                        .on_click({
-                            let entity = cx.entity();
-                            move |checked, _window, cx| {
-                                entity.update(cx, |p, cx| {
-                                    p.local.happy_mode = *checked;
-                                    p.push_settings(cx);
                                     cx.notify();
                                 });
                             }
@@ -885,17 +859,124 @@ impl SettingsPanel {
                         Button::new("export-db")
                             .outline()
                             .small()
-                            .disabled(true)
-                            .tooltip("开发中")
-                            .label("导出"),
+                            .label("导出")
+                            .on_click({
+                                move |_, window, cx| {
+                                    let Some(app) = cx
+                                        .try_global::<DoitAppHandle>()
+                                        .map(|h| h.0.clone())
+                                    else {
+                                        return;
+                                    };
+                                    // Snapshot the current data up-front; the
+                                    // save dialog resolves asynchronously.
+                                    let snap = {
+                                        let app = app.read(&*cx);
+                                        SyncSnapshot {
+                                            version: 1,
+                                            exported_at: app.last_modified.clone(),
+                                            todos: app.todos.clone(),
+                                            settings: app.settings.clone(),
+                                        }
+                                    };
+                                    let json = match serde_json::to_string_pretty(&snap) {
+                                        Ok(json) => json,
+                                        Err(_) => {
+                                            window.push_notification(
+                                                Notification::error("序列化数据失败"),
+                                                &mut *cx,
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    let dir = std::env::temp_dir();
+                                    let receiver =
+                                        cx.prompt_for_new_path(&dir, Some("doit-backup.json"));
+                                    window.spawn(&*cx, async move |async_cx| {
+                                        let path = match receiver.await {
+                                            Ok(Ok(Some(path))) => path,
+                                            _ => return, // 用户取消
+                                        };
+                                        let result = std::fs::write(&path, &json);
+                                        let _ = async_cx.update(|window, app_cx| {
+                                            let ok = result.is_ok();
+                                            window.push_notification(
+                                                if ok {
+                                                    Notification::success(format!(
+                                                        "已导出到 {}",
+                                                        path.display()
+                                                    ))
+                                                } else {
+                                                    Notification::error("导出失败")
+                                                },
+                                                app_cx,
+                                            );
+                                        });
+                                    })
+                                    .detach();
+                                }
+                            }),
                     )
                     .child(
                         Button::new("import-db")
                             .outline()
                             .small()
-                            .disabled(true)
-                            .tooltip("开发中")
-                            .label("导入"),
+                            .label("导入")
+                            .on_click({
+                                let entity = cx.entity();
+                                move |_, window, cx| {
+                                    let receiver = cx.prompt_for_paths(PathPromptOptions {
+                                        files: true,
+                                        directories: false,
+                                        multiple: false,
+                                        prompt: Some("选择要导入的 JSON 备份文件".into()),
+                                    });
+                                    let entity = entity.clone();
+                                    window.spawn(&*cx, async move |async_cx| {
+                                        let path = match receiver.await {
+                                            Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                                                Some(path) => path,
+                                                None => return,
+                                            },
+                                            _ => return, // 用户取消
+                                        };
+                                        let parsed = std::fs::read_to_string(&path)
+                                            .ok()
+                                            .and_then(|s| {
+                                                serde_json::from_str::<SyncSnapshot>(&s).ok()
+                                            });
+                                        let _ = async_cx.update(|window, app_cx| {
+                                            let Some(snap) = parsed else {
+                                                window.push_notification(
+                                                    Notification::error("导入失败：不是有效的备份文件"),
+                                                    app_cx,
+                                                );
+                                                return;
+                                            };
+                                            // Apply to the app first (todos +
+                                            // settings + theme), then refresh
+                                            // this panel's working copy.
+                                            if let Some(handle) = app_cx
+                                                .try_global::<DoitAppHandle>()
+                                            {
+                                                let app = handle.0.clone();
+                                                let settings = snap.settings.clone();
+                                                app.update(app_cx, |app, cx| {
+                                                    app.apply_snapshot(snap, window, cx);
+                                                });
+                                                entity.update(app_cx, |p, cx| {
+                                                    p.reload_after_import(settings, window, cx);
+                                                });
+                                            }
+                                            window.push_notification(
+                                                Notification::success("已导入数据"),
+                                                app_cx,
+                                            );
+                                        });
+                                    })
+                                    .detach();
+                                }
+                            }),
                     )
                     .child(
                         Button::new("clear-data")

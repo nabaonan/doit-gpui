@@ -25,12 +25,11 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
     self, div, AnyElement, App, Hsla, Context, Entity, Global, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, SharedString, Styled, Subscription, Window,
-    WindowAppearance, px, ElementId,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowAppearance, px,
+    ElementId,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 // ── Global handle for context-menu callbacks ────────────────────────────────
 
 pub struct DoitAppHandle(pub Entity<DoitApp>);
@@ -127,9 +126,6 @@ pub struct DoitApp {
     cat_select: Entity<CatSelectState>,
     _cat_select_sub: Subscription,
 
-    /// Tracks a pending long-press (row id, when it started).
-    long_press: Option<(String, Instant)>,
-
     /// Subtasks: parent ids whose children are currently collapsed in the today
     /// view (in-memory only).
     collapsed: HashSet<String>,
@@ -197,7 +193,6 @@ impl DoitApp {
                     Some(Some(id)) => CatFilter::Id(id.clone()),
                     _ => CatFilter::None,
                 };
-                this.long_press = None;
                 cx.notify();
             },
         );
@@ -221,7 +216,6 @@ impl DoitApp {
             backup_panel,
             calendar_state,
             selected_cal_date: today.format("%Y-%m-%d").to_string(),
-            long_press: None,
             collapsed: HashSet::new(),
             _input_sub: input_sub,
             _calendar_sub: calendar_sub,
@@ -615,7 +609,6 @@ impl DoitApp {
                                     .label(view.label())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.view_mode = v;
-                                        this.long_press = None;
                                         cx.notify();
                                     }))
                             })),
@@ -725,7 +718,6 @@ impl DoitApp {
     fn render_today(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active_todos();
         let tags = self.settings.tags.clone();
-        let is_longpress = self.settings.completion_mode.as_ref() == "longpress";
 
         div()
             .v_flex()
@@ -736,7 +728,7 @@ impl DoitApp {
                 div()
                     .v_flex()
                     .gap_1()
-                    .children(self.render_todo_forest(&active, &tags, is_longpress, window, cx)),
+                    .children(self.render_todo_forest(&active, &tags, window, cx)),
             )
             .when(active.is_empty(), |el| {
                 el.child(
@@ -757,7 +749,6 @@ impl DoitApp {
         &mut self,
         items: &[TodoItem],
         tags: &[Tag],
-        is_longpress: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -767,9 +758,7 @@ impl DoitApp {
                 None => true,
                 Some(pid) => !items.iter().any(|o| o.id == *pid),
             })
-            .map(|root| {
-                self.render_todo_node(root, items, tags, is_longpress, 0, window, cx)
-            })
+            .map(|root| self.render_todo_node(root, items, tags, 0, window, cx))
             .collect()
     }
 
@@ -778,7 +767,6 @@ impl DoitApp {
         todo: &TodoItem,
         all: &[TodoItem],
         tags: &[Tag],
-        is_longpress: bool,
         depth: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -792,7 +780,6 @@ impl DoitApp {
             .render_todo_row(
                 todo,
                 tags,
-                is_longpress,
                 depth,
                 has_children,
                 collapsed,
@@ -805,7 +792,7 @@ impl DoitApp {
             .child(row)
             .when(!collapsed, |el| {
                 el.children(children.into_iter().map(|child| {
-                    self.render_todo_node(child, all, tags, is_longpress, depth + 1, window, cx)
+                    self.render_todo_node(child, all, tags, depth + 1, window, cx)
                 }))
             })
             .into_any_element()
@@ -855,7 +842,6 @@ impl DoitApp {
         &mut self,
         todo: &TodoItem,
         tags: &[Tag],
-        is_longpress: bool,
         depth: usize,
         has_children: bool,
         collapsed: bool,
@@ -866,7 +852,6 @@ impl DoitApp {
         let completed = todo.completed;
         let content = todo.content.clone();
         let tag_id = todo.tag_id.clone();
-        let duration = self.settings.long_press_duration;
         let tag_for_display: Option<(SharedString, SharedString)> = tag_id
             .as_ref()
             .and_then(|tid| tags.iter().find(|t| t.id == *tid))
@@ -885,47 +870,6 @@ impl DoitApp {
             // 12px padding, one extra indent step per depth (16px/level).
             .when(depth > 0, |el| el.pl(px(12. + SUBTASK_INDENT * depth as f32)))
             .hover(|s| s.bg(cx.theme().muted))
-            .when(is_longpress, |el| {
-                let id_down = id.clone();
-                el.on_mouse_down(
-                    MouseButton::Left,
-                    move |_, _window, cx| {
-                        if let Some(handle) = cx.try_global::<DoitAppHandle>() {
-                            let app = handle.0.clone();
-                            app.update(cx, |app, _| {
-                                app.long_press = Some((id_down.clone(), Instant::now()));
-                            });
-                        }
-                    },
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    {
-                        let id_up = id.clone();
-                        move |_, _window, cx| {
-                            if let Some(handle) = cx.try_global::<DoitAppHandle>() {
-                                let app = handle.0.clone();
-                                let complete = app
-                                    .read(cx)
-                                    .long_press
-                                    .as_ref()
-                                    .map(|(i, t)| *i == id_up && t.elapsed().as_secs() >= duration as u64)
-                                    .unwrap_or(false);
-                                if complete {
-                                    app.update(cx, |app, cx| {
-                                        app.long_press = None;
-                                        app.toggle_todo(&id_up, cx);
-                                    });
-                                } else {
-                                    app.update(cx, |app, _| {
-                                        app.long_press = None;
-                                    });
-                                }
-                            }
-                        }
-                    },
-                )
-            })
             .context_menu({
                 let id_for_menu = id.clone();
                 let menu_tags = tags.to_vec();
@@ -1135,39 +1079,20 @@ impl DoitApp {
                 },
             )
             .child(
-                if is_longpress {
-                    div()
-                        .size_4()
-                        .rounded_full()
-                        .border_1()
-                        .flex_shrink_0()
-                        .border_color(if completed {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().border
-                        })
-                        .bg(if completed {
-                            cx.theme().primary
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .into_any_element()
-                } else {
-                    Checkbox::new(ElementId::Name(format!("chk-{}", &id).into()))
-                        .checked(completed)
-                        // A parent's completion is derived from its subtasks.
-                        .disabled(has_children)
-                        .on_click({
-                            let id = id.clone();
-                            move |_, _, cx| {
-                                if let Some(handle) = cx.try_global::<DoitAppHandle>() {
-                                    let app = handle.0.clone();
-                                    app.update(cx, |app, cx| app.toggle_todo(&id, cx));
-                                }
+                Checkbox::new(ElementId::Name(format!("chk-{}", &id).into()))
+                    .checked(completed)
+                    // A parent's completion is derived from its subtasks.
+                    .disabled(has_children)
+                    .on_click({
+                        let id = id.clone();
+                        move |_, _, cx| {
+                            if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                let app = handle.0.clone();
+                                app.update(cx, |app, cx| app.toggle_todo(&id, cx));
                             }
-                        })
-                        .into_any_element()
-                },
+                        }
+                    })
+                    .into_any_element(),
             )
             .child(
                 if is_editing {
@@ -2090,6 +2015,38 @@ mod persistence_tests {
         assert_eq!(loaded.settings.tags.len(), 3, "default tags + the added one");
         assert_eq!(loaded.exported_at, "2026-09-16T12:00:00");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The export path serializes with `to_string_pretty`; importing parses
+    /// via `from_str`. Guard that a pretty-printed snapshot round-trips (an
+    /// export users can actually re-import).
+    #[test]
+    fn export_json_round_trips_through_import() {
+        let snap = SyncSnapshot {
+            version: 1,
+            exported_at: "2026-09-16T12:00:00".into(),
+            todos: vec![TodoItem {
+                id: "t1".into(),
+                content: "导出测试".into(),
+                completed: false,
+                created_at: "2026-09-16T10:00:00".into(),
+                completed_at: None,
+                order: 0,
+                tag_id: Some("tag-w".into()),
+                cat_id: Some("cat-work".into()),
+                parent_id: None,
+                remind_at: None,
+            }],
+            settings: AppSettings::default(),
+        };
+        let json = serde_json::to_string_pretty(&snap).expect("serialize export json");
+        let restored: SyncSnapshot =
+            serde_json::from_str(&json).expect("import parses its own export");
+        assert_eq!(restored.todos.len(), 1);
+        assert_eq!(restored.todos[0].content, "导出测试");
+        assert_eq!(restored.todos[0].tag_id.as_deref(), Some("tag-w"));
+        assert_eq!(restored.settings.theme.as_ref(), "system");
+        assert_eq!(restored.exported_at, "2026-09-16T12:00:00");
     }
 }
 

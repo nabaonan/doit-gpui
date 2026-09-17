@@ -72,8 +72,6 @@ pub struct AppSettings {
     pub completion_mode: SharedString,
     pub long_press_duration: u32,
     pub theme: SharedString,
-    pub happy_mode: bool,
-    pub font_family: SharedString,
     pub add_todo_shortcut: ShortcutConfig,
     pub tags: Vec<Tag>,
     pub categories: Vec<Category>,
@@ -89,8 +87,6 @@ impl Default for AppSettings {
             completion_mode: "checkbox".into(),
             long_press_duration: 3,
             theme: "system".into(),
-            happy_mode: false,
-            font_family: "default".into(),
             add_todo_shortcut: ShortcutConfig {
                 key: "Enter".into(),
                 ctrl: false,
