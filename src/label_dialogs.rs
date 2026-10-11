@@ -1,16 +1,16 @@
-use gpui_kit::base::Selectable as _;
-use gpui_kit::base::StyledExt as _;
+use gpui_kit::base::{ColorPicker as BaseColorPicker, ColorSwatch, Selectable, StyledExt as _};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::{
     ActiveTheme, Colorize, Sizable, WindowExt,
     button::Button,
-    color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
+    color_picker::{ColorPickerEvent, ColorPickerState},
     input::{Input, InputState, InputEvent},
+    popover::Popover,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
-    div, Context, Entity, Focusable, IntoElement, ParentElement, Render, Styled, Subscription,
-    Window, px, ElementId, Hsla,
+    App, div, Context, Entity, Focusable, IntoElement, ParentElement, Render, RenderOnce, Styled,
+    Subscription, Window, px, ElementId, Hsla,
 };
 use crate::app::{DoitAppHandle, add_shortcut_matches};
 use crate::types::*;
@@ -32,22 +32,127 @@ fn color_from_hex(hex: &str) -> Hsla {
     Colorize::parse_hex(hex).unwrap_or_else(|_| Hsla::blue())
 }
 
-/// Quick-pick palette the official `ColorPicker` shows above its built-in
-/// swatches.
-///
-/// The official component derives every swatch's `ElementId` from the colour's
-/// hex, and its *default* featured colours (the theme red/blue/green/accent
-/// tones) all duplicate hexes in its built-in palettes. With accessibility
-/// active, opening the popover therefore builds two identical a11y node ids and
-/// panics ("Duplicate a11y node id"). Fix: pass our own featured set that is
-/// disjoint from the component's 9 built-in palettes (stone/red/orange/yellow/
-/// green/cyan/blue/purple/pink) — the app's brand colours those palettes do not
-/// already list. Everything else is reachable from the built-in palettes below.
-fn picker_featured_colors() -> Vec<Hsla> {
-    ["#F59E0B", "#84CC16", "#14B8A6", "#6366F1", "#D946EF"]
-        .iter()
-        .map(|hex| color_from_hex(hex))
-        .collect()
+/// The app's preset colours as a row of circular swatches; the current colour
+/// is ringed. Picking commits through [`ColorPickerState::select_color`],
+/// which closes the popover and emits [`ColorPickerEvent::Change`] — the
+/// panels' existing subscriptions handle the write-back unchanged.
+fn render_preset_dots(
+    state: &Entity<ColorPickerState>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let current = state.read(cx).value();
+    div()
+        .h_flex()
+        .flex_wrap()
+        .gap_1()
+        .children(COLOR_PALETTE.iter().map(|(_, hex)| {
+            let color = color_from_hex(hex);
+            let selected = current == Some(color);
+            let state = state.clone();
+            ColorSwatch::new(ElementId::Name(format!("quick-color-{hex}").into()), color)
+                .selected(selected)
+                .size_5()
+                .rounded_full()
+                .bg(color)
+                .border_1()
+                .border_color(color.darken(0.1))
+                .when(selected, |s| s.border_2().border_color(cx.theme().foreground))
+                .hover(|s| s.bg(color.lighten(0.12)).border_color(color.darken(0.35)))
+                .on_click(move |color, _, window, cx| {
+                    state.update(cx, |s, cx| s.select_color(color, window, cx));
+                })
+        }))
+}
+
+/// The small square trigger showing the current colour.
+#[derive(IntoElement)]
+struct QuickColorSwatch {
+    id: ElementId,
+    selected: bool,
+    value: Option<Hsla>,
+}
+
+impl Selectable for QuickColorSwatch {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for QuickColorSwatch {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .id(self.id)
+            .size(px(16.))
+            .rounded_full()
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().input)
+            .bg(cx.theme().tokens.background)
+            .when_some(self.value, |this, value| {
+                this.bg(value)
+                    .border_color(value.darken(0.3))
+                    .when(self.selected, |this| {
+                        this.border_2().border_color(cx.theme().foreground)
+                    })
+            })
+    }
+}
+
+/// Minimal colour picker: the trigger square opens a small popover listing only
+/// the app's preset colours — no Palette/HSLA tabs, no swatch grid, no hex
+/// field. It keeps using [`ColorPickerState`] (value, open state), so the
+/// panels' `Change` subscriptions and `add_new` reads are untouched.
+#[derive(IntoElement)]
+struct QuickColorPicker {
+    id: ElementId,
+    state: Entity<ColorPickerState>,
+}
+
+impl QuickColorPicker {
+    fn new(state: &Entity<ColorPickerState>) -> Self {
+        Self {
+            id: ("color-picker", state.entity_id()).into(),
+            state: state.clone(),
+        }
+    }
+}
+
+impl RenderOnce for QuickColorPicker {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let open = self.state.read(cx).is_open();
+        let focus_handle = self.state.focus_handle(cx);
+        let value = self.state.read(cx).value();
+        let open_state = self.state.clone();
+        let popover_state = self.state.clone();
+        let dots_state = self.state.clone();
+
+        BaseColorPicker::new(self.id.clone())
+            .open(open)
+            .track_focus(&focus_handle)
+            .accessibility_label("选择颜色")
+            .on_open_change(move |open, _, cx| {
+                open_state.update(cx, |s, cx| s.set_open(open, cx));
+            })
+            .child(
+                Popover::new("popover")
+                    .open(open)
+                    .on_open_change(move |open, _, cx| {
+                        popover_state.update(cx, |s, cx| s.set_open(*open, cx));
+                    })
+                    .trigger(QuickColorSwatch {
+                        id: "trigger".into(),
+                        selected: false,
+                        value,
+                    })
+                    .content(move |_, window, cx| render_preset_dots(&dots_state, window, cx)),
+            )
+    }
 }
 
 // ── Category management panel ───────────────────────────────────────────────
@@ -319,9 +424,7 @@ impl Render for CategoriesPanel {
                                     ),
                                 )
                                 .child(
-                                    ColorPicker::new(&edit_color)
-                                        .featured_colors(picker_featured_colors())
-                                        .small(),
+                                    QuickColorPicker::new(&edit_color),
                                 )
                                 .child(
                                     Button::new(ElementId::Name(format!("cat-save-{id}").into()))
@@ -391,9 +494,7 @@ impl Render for CategoriesPanel {
                         } else {
                             row = row
                                 .child(
-                                    ColorPicker::new(&row_picker)
-                                        .featured_colors(picker_featured_colors())
-                                        .small(),
+                                    QuickColorPicker::new(&row_picker),
                                 )
                                 .child(
                                     div()
@@ -506,9 +607,7 @@ impl Render for CategoriesPanel {
                     .items_center()
                     .gap_2()
                     .child(
-                        ColorPicker::new(&new_color_picker)
-                            .featured_colors(picker_featured_colors())
-                            .small(),
+                        QuickColorPicker::new(&new_color_picker),
                     )
                     .child(
                         div()
@@ -817,9 +916,7 @@ impl Render for TagsPanel {
                                     ),
                                 )
                                 .child(
-                                    ColorPicker::new(&edit_color)
-                                        .featured_colors(picker_featured_colors())
-                                        .small(),
+                                    QuickColorPicker::new(&edit_color),
                                 )
                                 .child(
                                     Button::new(ElementId::Name(format!("tag-save-{id}").into()))
@@ -886,9 +983,7 @@ impl Render for TagsPanel {
                         } else {
                             row = row
                                 .child(
-                                    ColorPicker::new(&row_picker)
-                                        .featured_colors(picker_featured_colors())
-                                        .small(),
+                                    QuickColorPicker::new(&row_picker),
                                 )
                                 .child(
                                     div()
@@ -970,9 +1065,7 @@ impl Render for TagsPanel {
                     .items_center()
                     .gap_2()
                     .child(
-                        ColorPicker::new(&new_color_picker)
-                            .featured_colors(picker_featured_colors())
-                            .small(),
+                        QuickColorPicker::new(&new_color_picker),
                     )
                     .child(
                         div()

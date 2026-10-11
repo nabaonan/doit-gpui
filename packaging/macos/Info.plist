@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Doit</string>
+  <string>doit-gpui</string>
   <key>CFBundleDisplayName</key>
-  <string>Doit</string>
+  <string>doit-gpui</string>
   <key>CFBundleIdentifier</key>
   <string>com.nbn.doit-gpui</string>
   <key>CFBundleExecutable</key>

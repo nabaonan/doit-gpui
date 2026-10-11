@@ -5,7 +5,9 @@ edition = "2021"
 description = "Doit - A minimalist todo app rewritten in pure Rust with GPUI Kit"
 
 [dependencies]
-gpui-kit = "=0.6.0"
+# gpui-kit bundles gpui (gpui-pre) at a matching revision; bumping it upgrades
+# gpui itself to the bundled gpui-pre (0.3.8 as of gpui-kit 0.7.1).
+gpui-kit = "=0.7.1"
 # chrono is already a compiled dependency of gpui itself (its calendar/date-picker
 # link it); adding it here costs no new compilation. Needed for correct local-date
 # handling (calendar view, timeline grouping) that std alone cannot provide.

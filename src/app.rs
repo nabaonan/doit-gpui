@@ -7,7 +7,7 @@ use gpui_kit::base::Disableable as _;
 use gpui_kit::base::Selectable;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::button::ButtonVariants;
-use gpui_kit::component::calendar::{Calendar, CalendarEvent, CalendarState, Date};
+use gpui_kit::component::calendar::{CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::select::{
     SearchableVec, Select, SelectEvent, SelectItem, SelectState,
@@ -17,7 +17,7 @@ use gpui_kit::component::marker::Marker;
 use gpui_kit::component::Colorize;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName, Root, Sizable, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Icon, IconName, Sizable, Theme, ThemeMode, WindowExt,
     button::Button,
     input::{Input, InputState, InputEvent},
     menu::{ContextMenuExt, PopupMenuItem},
@@ -567,9 +567,8 @@ impl Render for DoitApp {
                     .overflow_y_scroll()
                     .child(self.render_content(window, cx).into_any_element()),
             )
-            .children(Root::render_dialog_layer(window, cx))
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_notification_layer(window, cx))
+            // gpui-kit >= 0.7.1: the Root's WindowState plugin mounts the
+            // dialog/sheet/notification layers automatically.
     }
 }
 
@@ -594,7 +593,6 @@ impl DoitApp {
                     .flex()
                     .gap_3()
                     .items_center()
-                    .child(div().text_base().font_bold().child("Doit"))
                     .child(
                         div()
                             .flex()
@@ -1194,11 +1192,11 @@ impl DoitApp {
                     .flex()
                     .items_start()
                     .gap_5()
-                    // Interactive month grid.
+                    // Interactive month grid; days with completed items carry a dot.
                     .child(
                         div()
                             .w(px(380.))
-                            .child(Calendar::new(&self.calendar_state).small()),
+                            .child(self.render_calendar_grid(cx)),
                     )
                     // Completed items for the selected date.
                     .child(
@@ -1247,6 +1245,186 @@ impl DoitApp {
                             })),
                     ),
             )
+    }
+
+    /// Month grid, driven by [`CalendarState`] (selection, month nav, today).
+    ///
+    /// The published `Calendar` component cannot surface per-day data to its
+    /// item slot (no date is exposed there), so the day view is rendered here
+    /// and a small dot is added under every day that has completed items.
+    fn render_calendar_grid(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let completed: HashSet<String> = self
+            .todos
+            .iter()
+            .filter(|t| t.completed && t.completed_at.is_some())
+            .filter_map(|t| t.completed_at.as_deref().map(date_part))
+            .collect();
+
+        // Hoist theme values into Copy locals so the render closures below
+        // only capture owned `cal` clones and plain values, never `cx`.
+        let muted = cx.theme().muted_foreground;
+        let foreground = cx.theme().foreground;
+        let secondary_hover = cx.theme().tokens.secondary_hover;
+        let accent = cx.theme().accent;
+        let accent_foreground = cx.theme().accent_foreground;
+        let primary = cx.theme().primary;
+        let primary_foreground = cx.theme().primary_foreground;
+        let success = cx.theme().success;
+        let radius = cx.theme().radius;
+        let border = cx.theme().border;
+        let radius_lg = cx.theme().radius_lg;
+
+        let state = self.calendar_state.read(cx);
+        let month = state.current_month() as u32;
+        let year = state.current_year();
+        let today = state.today();
+        let selected = match state.date() {
+            Date::Single(Some(d)) => d,
+            _ => today,
+        };
+        let weeks = state.month_days().into_iter().next().unwrap_or_default();
+        let cal = self.calendar_state.clone();
+
+        const WEEKDAYS: [&str; 7] = ["日", "一", "二", "三", "四", "五", "六"];
+
+        let nav_button = |is_prev: bool| -> AnyElement {
+            let cal = cal.clone();
+            let icon = if is_prev {
+                Icon::new(IconName::ChevronLeft)
+            } else {
+                Icon::new(IconName::ChevronRight)
+            };
+            div()
+                .id(ElementId::Name(if is_prev {
+                    "cal-nav-prev".into()
+                } else {
+                    "cal-nav-next".into()
+                }))
+                .size_6()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(radius)
+                .text_color(foreground)
+                .hover(move |this| this.bg(secondary_hover))
+                .child(icon.size_4())
+                .on_click(move |_, _, cx| {
+                    cal.update(cx, |s, cx| {
+                        if is_prev {
+                            s.prev_month();
+                        } else {
+                            s.next_month();
+                        }
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        };
+
+        div()
+            .w(px(220.))
+            .border_1()
+            .border_color(border)
+            .rounded(radius_lg)
+            .p_3()
+            .v_flex()
+            .gap_0p5()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(nav_button(true))
+                    .child(div().text_sm().font_medium().child(format!("{year} 年 {month} 月")))
+                    .child(nav_button(false)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_0p5()
+                    .children(WEEKDAYS.iter().map(|name| {
+                        div()
+                            .flex_1()
+                            .size_6()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_normal()
+                            .text_color(muted)
+                            .child(*name)
+                    })),
+            )
+            .children(weeks.into_iter().map(move |week| {
+                let mut row = div().flex().gap_0p5();
+                for date in week {
+                    let has_dot = completed.contains(&date.to_string());
+                    let is_today = date == today;
+                    let is_selected = date == selected;
+                    let is_muted_day = date.month() != month;
+                    let day_label = date.day().to_string();
+                    let cal = cal.clone();
+                    row = row.child(
+                        div()
+                            .flex_1()
+                            .v_flex()
+                            .items_center()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .id(ElementId::Name(format!("cal-day-{date}").into()))
+                                    // `size_6` (24px) < the flex column (~26px):
+                                    // the selected/today/hover fill stays inside
+                                    // the grid instead of spilling past its edge.
+                                    .size_6()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(radius / 2.)
+                                    .text_xs()
+                                    .aria_label(if has_dot {
+                                        format!("{date}，有已完成事项")
+                                    } else {
+                                        date.to_string()
+                                    })
+                                    .when(is_muted_day, |this| this.text_color(muted))
+                                    .when(
+                                        !is_muted_day && !is_today && !is_selected,
+                                        |this| {
+                                            this.hover(move |this| {
+                                                this.bg(secondary_hover).text_color(foreground)
+                                            })
+                                        },
+                                    )
+                                    .when(is_today && !is_selected, move |this| {
+                                        this.bg(accent).text_color(accent_foreground)
+                                    })
+                                    .when(is_selected, move |this| {
+                                        this.bg(primary).text_color(primary_foreground)
+                                    })
+                                    .child(day_label)
+                                    .on_click(move |_, _, cx| {
+                                        cal.update(cx, |s, cx| s.activate_date(date, cx));
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .h_1p5()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(has_dot, move |this| {
+                                        // `success`-tinted dot signals a day with
+                                        // completed items; the aria label above
+                                        // keeps that status beyond colour alone.
+                                        this.child(div().size_1p5().rounded_full().bg(success))
+                                    }),
+                            ),
+                    );
+                }
+                row.into_any_element()
+            }))
     }
 }
 impl DoitApp {
