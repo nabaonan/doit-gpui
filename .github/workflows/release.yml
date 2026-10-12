@@ -28,15 +28,19 @@ concurrency:
 jobs:
   macos:
     name: macOS DMG (${{ matrix.arch }})
-    runs-on: macos-14
+    # Native arch per runner: macos-15 is Apple Silicon (arm64),
+    # macos-15-intel is Intel x64 — each target builds on matching hardware.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             arch: arm64
+            runner: macos-15
           - target: x86_64-apple-darwin
             arch: x64
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
