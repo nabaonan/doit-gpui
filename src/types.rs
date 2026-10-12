@@ -61,6 +61,12 @@ pub struct CloudSyncConfig {
     pub webdav_url: SharedString,
     pub webdav_username: SharedString,
     pub webdav_password: SharedString,
+    /// ISO timestamp of the last successful sync — the common version both ends
+    /// agreed on. Syncing compares each side against it: if only local changed
+    /// push local, if only remote changed pull remote, if both changed ask the
+    /// user. Empty until the first sync writes it.
+    #[serde(default)]
+    pub last_synced_at: String,
     pub fetch_on_startup: bool,
     pub upload_on_exit: bool,
     pub keep_recent: u32,
@@ -110,6 +116,7 @@ impl Default for AppSettings {
                 webdav_url: "".into(),
                 webdav_username: "".into(),
                 webdav_password: "".into(),
+                last_synced_at: "".into(),
                 fetch_on_startup: true,
                 upload_on_exit: true,
                 keep_recent: 3,

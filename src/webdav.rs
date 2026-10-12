@@ -252,27 +252,52 @@ pub(crate) fn local_stamp() -> String {
     chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
-/// Pick which snapshot is authoritative for a sync: **the newest version wins**.
+/// What a sync should do once the remote snapshot has been fetched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SyncDecision {
+    /// Use the local snapshot as authoritative (push it over the remote).
+    PushLocal,
+    /// Use the remote snapshot as authoritative (pull it over local).
+    PullRemote,
+    /// Both sides changed since the last sync — ask the user which one to keep.
+    AskUser,
+}
+
+/// Decide a sync against the last-sync base timestamp (`base`, the common
+/// version both ends last agreed on; `DoitApp::settings.cloud_sync.last_synced_at`):
 ///
-/// `local_last_modified` is when this machine's data last changed
-/// (`DoitApp::last_modified`, persisted across restarts); the remote snapshot
-/// carries its own `exported_at`. Whichever side is newer wins wholesale — so a
-/// todo deleted locally is not resurrected from the older cloud copy, and items
-/// added on another device arrive when that device's sync is the newer side.
+/// - **remote missing** (first sync): push local.
+/// - **only local changed** since the base (`local > base`, `remote <= base`):
+///   push local over remote.
+/// - **only remote changed** (`remote > base`, `local <= base`), **or nothing
+///   changed**: pull remote over local (identical content when nothing changed).
+/// - **both changed** (`local > base` **and** `remote > base`): ask the user.
 ///
-/// Ties and a missing remote (first sync) go to local.
-pub(crate) fn choose_authoritative(
+/// An empty base (old installs before this field, or fresh installs) falls back
+/// to: identical sides keep local, anything else asks — conservative, so no
+/// side's changes are silently dropped.
+pub(crate) fn decide_sync(
+    base: &str,
     local_last_modified: &str,
-    local: SyncSnapshot,
-    remote: Option<SyncSnapshot>,
-) -> SyncSnapshot {
+    remote: Option<&SyncSnapshot>,
+) -> SyncDecision {
     match remote {
-        None => local,
-        Some(remote) => {
-            if local_last_modified >= remote.exported_at.as_str() {
-                local
+        None => SyncDecision::PushLocal,
+        Some(r) => {
+            let r = r.exported_at.as_str();
+            if base.is_empty() {
+                return if local_last_modified == r {
+                    SyncDecision::PushLocal
+                } else {
+                    SyncDecision::AskUser
+                };
+            }
+            if local_last_modified > base && r > base {
+                SyncDecision::AskUser
+            } else if local_last_modified > base {
+                SyncDecision::PushLocal
             } else {
-                remote
+                SyncDecision::PullRemote
             }
         }
     }
@@ -308,31 +333,64 @@ mod tests {
     }
 
     #[test]
-    fn local_deletion_is_not_resurrected_when_local_is_newer() {
-        // Local deleted "b" (its data is newer); the cloud still has it. The
-        // newest version wins, so "b" must stay gone instead of being restored.
-        let local = snap(&["a"], "2026-01-03T00:00:00");
-        let remote = snap(&["a", "b"], "2026-01-02T00:00:00");
-        let chosen = choose_authoritative("2026-01-03T00:00:00", local, Some(remote));
-        let ids: Vec<_> = chosen.todos.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["a"]);
+    fn first_sync_pushes_local() {
+        // No remote file yet: local is authoritative no matter the stamps.
+        assert!(matches!(
+            decide_sync("", "2026-01-03T00:00:00", None),
+            SyncDecision::PushLocal
+        ));
     }
 
     #[test]
-    fn newer_cloud_wins_and_restores_remote_data() {
-        // Another device synced last; its data (including a locally-missing
-        // item) is authoritative and should be pulled down.
-        let local = snap(&["a"], "2026-01-01T00:00:00");
-        let remote = snap(&["a", "c"], "2026-01-02T00:00:00");
-        let chosen = choose_authoritative("2026-01-01T00:00:00", local, Some(remote));
-        let ids: Vec<_> = chosen.todos.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "c"]);
+    fn only_local_changed_pushes_local() {
+        // Remote == base (not changed since last sync), local moved later.
+        let remote = snap(&["a"], "2026-01-02T00:00:00");
+        assert!(matches!(
+            decide_sync("2026-01-02T00:00:00", "2026-01-03T00:00:00", Some(&remote)),
+            SyncDecision::PushLocal
+        ));
     }
 
     #[test]
-    fn missing_remote_keeps_local() {
-        let local = snap(&["a"], "2026-01-03T00:00:00");
-        let chosen = choose_authoritative("2026-01-03T00:00:00", local, None);
-        assert_eq!(chosen.todos.len(), 1);
+    fn only_remote_changed_pulls_remote() {
+        // Local == base (not changed), remote moved later: overwrite local.
+        let remote = snap(&["a"], "2026-01-03T00:00:00");
+        assert!(matches!(
+            decide_sync("2026-01-02T00:00:00", "2026-01-02T00:00:00", Some(&remote)),
+            SyncDecision::PullRemote
+        ));
+    }
+
+    #[test]
+    fn nothing_changed_pulls_remote_harmlessly() {
+        // Both sides sit on the base: pulling remote is a no-op content-wise.
+        let remote = snap(&["a"], "2026-01-02T00:00:00");
+        assert!(matches!(
+            decide_sync("2026-01-02T00:00:00", "2026-01-02T00:00:00", Some(&remote)),
+            SyncDecision::PullRemote
+        ));
+    }
+
+    #[test]
+    fn both_changed_asks_user() {
+        let remote = snap(&["a"], "2026-01-03T00:00:00");
+        assert!(matches!(
+            decide_sync("2026-01-02T00:00:00", "2026-01-03T00:00:00", Some(&remote)),
+            SyncDecision::AskUser
+        ));
+    }
+
+    #[test]
+    fn unknown_base_is_conservative() {
+        // No base recorded yet: identical sides need no prompt, differing sides ask.
+        let remote = snap(&["a"], "2026-01-02T00:00:00");
+        assert!(matches!(
+            decide_sync("", "2026-01-02T00:00:00", Some(&remote)),
+            SyncDecision::PushLocal
+        ));
+        assert!(matches!(
+            decide_sync("", "2026-01-03T00:00:00", Some(&remote)),
+            SyncDecision::AskUser
+        ));
     }
 }

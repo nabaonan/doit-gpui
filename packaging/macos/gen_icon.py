@@ -21,7 +21,9 @@ OUT_DIR = os.path.dirname(os.path.abspath(__file__)) if len(sys.argv) < 2 else s
 SIZE = 1024            # master size in px
 SS = 2                 # supersampling factor (samples per axis per pixel)
 R = 0.228              # rounded-rect corner radius (fraction of width)
-CHECK_T = 0.052        # check stroke half-thickness (fraction of width)
+CHECK_T = 0.042        # check stroke half-thickness (fraction of width); thinner
+                       # than before (0.052) so the glyph reads lighter, in the
+                       # style of the green reference icon
 BLUE = (59, 130, 246)  # #3B82F6
 WHITE = (255, 255, 255)
 
@@ -49,8 +51,10 @@ def check_sdf(px: float, py: float) -> float:
     """Signed distance to a check mark made of two segments, in the same
     centered [-0.5, 0.5] space as the rounded square."""
     # A ✓ from upper-left, dipping just below centre, rising to the right.
-    d1 = seg_dist(px, py, -0.23, 0.03, -0.07, 0.19)
-    d2 = seg_dist(px, py, -0.07, 0.19, 0.23, -0.16)
+    # Endpoints are scaled 0.9× inward so the glyph keeps its shape but gains
+    # breathing room (more margin) from the rounded-square edges.
+    d1 = seg_dist(px, py, -0.207, 0.027, -0.063, 0.171)
+    d2 = seg_dist(px, py, -0.063, 0.171, 0.207, -0.144)
     return min(d1, d2) - CHECK_T
 
 

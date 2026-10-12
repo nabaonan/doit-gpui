@@ -1,15 +1,16 @@
 use gpui_kit::base::Disableable as _;
 use gpui_kit::base::StyledExt as _;
-use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::button::{ButtonVariants as _, ButtonVariant};
 use gpui_kit::component::{
-    ActiveTheme, Sizable,
+    ActiveTheme, Sizable, WindowExt,
     button::Button,
     input::{Input, InputState},
 };
 use gpui_kit::prelude::*;
+use std::sync::Arc;
 use gpui_kit::gpui::{
     div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window,
-    px,
+    http_client::HttpClient, px,
 };
 use crate::app::DoitAppHandle;
 use crate::types::*;
@@ -115,6 +116,38 @@ impl BackupPanel {
                 });
             }
         }
+    }
+
+    /// Persist `snap` to the cloud (stamped "now") and apply it locally, showing
+    /// `ok_msg` on success. Shared by the automatic newest-wins merge and the
+    /// user-confirmed "cover local" path.
+    fn finalize(
+        entity: Entity<Self>,
+        client: Arc<dyn HttpClient>,
+        cfg: (String, String, String),
+        mut snap: SyncSnapshot,
+        ok_msg: &'static str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.spawn(cx, async move |async_cx| {
+            // 以"现在"为同步时点：同时推进云端 exported_at 与本机记录的
+            // last_synced_at（同步基准），应用后 apply_snapshot 会把这份
+            // settings 立回本地，两端从此停在同一个基准上。
+            let stamp = webdav::local_stamp();
+            snap.exported_at = stamp.clone();
+            snap.settings.cloud_sync.last_synced_at = stamp;
+            let outcome: Result<(SyncSnapshot, String), String> =
+                match webdav::upload_snapshot(client.as_ref(), &cfg.0, &cfg.1, &cfg.2, &snap).await
+                {
+                    Ok(_) => Ok((snap, ok_msg.to_string())),
+                    Err(e) => Err(e),
+                };
+            let _ = async_cx.update(|window, app_cx| {
+                BackupPanel::finish_sync(entity.clone(), outcome, window, app_cx);
+            });
+        })
+        .detach();
     }
 }
 
@@ -228,7 +261,8 @@ impl Render for BackupPanel {
                             )
                             .child(action_status(&self.test_state, cx)),
                     )
-                    // 立即同步（双向无丢失合并：并集 + 较新者胜，本地与云端均停在最新版）
+                    // 立即同步（以上次同步为基准：只改本地→上传本地；只改云端→拉取云端；
+                    // 双端都改→询问用户；两端都没改→保持不变）
                     .child(
                         div()
                             .v_flex()
@@ -253,7 +287,79 @@ impl Render for BackupPanel {
                                             });
                                             push_config(&mut *cx, &cfg);
                                             window.spawn(&*cx, async move |async_cx| {
-                                                // 1) 取云端快照（首次无备份 → None）
+                                                // 1) 主线程：本地快照 + 最后修改时间
+                                                let local = match async_cx.update(
+                                                    |_window, app_cx| {
+                                                        let app = app_cx
+                                                            .try_global::<DoitAppHandle>()
+                                                            .map(|h| h.0.clone());
+                                                        let Some(app) = app else {
+                                                            return Err(
+                                                                "内部错误：本地数据不可用"
+                                                                    .to_string(),
+                                                            );
+                                                        };
+                                                        let last = app
+                                                            .read(app_cx)
+                                                            .last_modified
+                                                            .clone();
+                                                        let (todos, settings) = (
+                                                            app.read(app_cx).todos.clone(),
+                                                            app.read(app_cx)
+                                                                .settings
+                                                                .clone(),
+                                                        );
+                                                        // 上次成功同步的时间点（衡量两侧的基准）
+                                                        let base = settings
+                                                            .cloud_sync
+                                                            .last_synced_at
+                                                            .clone();
+                                                        Ok((
+                                                            SyncSnapshot {
+                                                                version: 1,
+                                                                exported_at: last.clone(),
+                                                                todos,
+                                                                settings,
+                                                            },
+                                                            last,
+                                                            base,
+                                                        ))
+                                                    },
+                                                ) {
+                                                    Ok(r) => r,
+                                                    Err(e) => {
+                                                        let _ = async_cx.update(
+                                                            |window, app_cx| {
+                                                                BackupPanel::finish_sync(
+                                                                    entity.clone(),
+                                                                    Err(format!(
+                                                                        "窗口更新失败：{e}"
+                                                                    )),
+                                                                    window,
+                                                                    app_cx,
+                                                                );
+                                                            },
+                                                        );
+                                                        return;
+                                                    }
+                                                };
+                                                let (local, last, base) = match local {
+                                                    Ok(pair) => pair,
+                                                    Err(e) => {
+                                                        let _ = async_cx.update(
+                                                            |window, app_cx| {
+                                                                BackupPanel::finish_sync(
+                                                                    entity.clone(),
+                                                                    Err(e),
+                                                                    window,
+                                                                    app_cx,
+                                                                );
+                                                            },
+                                                        );
+                                                        return;
+                                                    }
+                                                };
+                                                // 2) 取云端快照（首次无备份 → None）
                                                 let remote = webdav::download_snapshot(
                                                     client.as_ref(),
                                                     &cfg.0,
@@ -261,80 +367,171 @@ impl Render for BackupPanel {
                                                     &cfg.2,
                                                 )
                                                 .await;
-                                                // 2) 主线程构造本地快照；最新版本为准
-                                                //    （本地数据最后修改时间 vs 云端 exported_at），
-                                                //    本地更晚则删除/改动生效，云端更晚则拉取云端。
-                                                let merged: Result<SyncSnapshot, String> =
-                                                    match async_cx.update(|_window, app_cx| {
-                                                        let app = app_cx
-                                                            .try_global::<DoitAppHandle>()
-                                                            .map(|h| h.0.clone());
-                                                        let Some(app) = app else {
-                                                            return Err("内部错误：本地数据不可用"
-                                                                .to_string());
-                                                        };
-                                                        let last = app.read(app_cx).last_modified.clone();
-                                                        let (todos, settings) = (
-                                                            app.read(app_cx).todos.clone(),
-                                                            app.read(app_cx).settings.clone(),
+                                                match remote {
+                                                    Err(e) => {
+                                                        let _ = async_cx.update(
+                                                            |window, app_cx| {
+                                                                BackupPanel::finish_sync(
+                                                                    entity.clone(),
+                                                                    Err(e),
+                                                                    window,
+                                                                    app_cx,
+                                                                );
+                                                            },
                                                         );
-                                                        let local = SyncSnapshot {
-                                                            version: 1,
-                                                            exported_at: last.clone(),
-                                                            todos,
-                                                            settings,
-                                                        };
-                                                        match remote {
-                                                            Err(e) => Err(e),
-                                                            Ok(remote) => Ok(
-                                                                webdav::choose_authoritative(
-                                                                    &last,
-                                                                    local,
-                                                                    remote,
-                                                                ),
-                                                            ),
-                                                        }
-                                                    }) {
-                                                        Ok(r) => r,
-                                                        Err(e) => {
-                                                            Err(format!("窗口更新失败：{e}"))
-                                                        }
-                                                    };
-                                                // 3) 把选定的版本以"现在"为同步时点写回云端；
-                                                //    成功后才应用到本地，保证两端停在同一版本。
-                                                let outcome: Result<(SyncSnapshot, String), String> =
-                                                    match merged {
-                                                        Ok(mut snap) => {
-                                                            snap.exported_at =
-                                                                webdav::local_stamp();
-                                                            match webdav::upload_snapshot(
-                                                                client.as_ref(),
-                                                                &cfg.0,
-                                                                &cfg.1,
-                                                                &cfg.2,
-                                                                &snap,
-                                                            )
-                                                            .await
-                                                            {
-                                                                Ok(_) => Ok((
-                                                                    snap,
-                                                                    "已同步，本地与云端均为最新"
-                                                                        .to_string(),
-                                                                )),
-                                                                Err(e) => Err(e),
+                                                    }
+                                                    Ok(remote) => {
+                                                        // 2) 按"上次同步基准时间点"决定：
+                                                        //    双端都改 → 弹框询问；仅本地改 → 上传覆盖云端；
+                                                        //    仅云端改（或都没改）→ 拉取云端覆盖本地。
+                                                        let action = webdav::decide_sync(
+                                                            &base,
+                                                            &last,
+                                                            remote.as_ref(),
+                                                        );
+                                                        use webdav::SyncDecision;
+                                                        match action {
+                                                            SyncDecision::AskUser => {
+                                                                // 双端都改 → 弹确认框，由用户决定保留哪边
+                                                                let Some(remote) = remote else {
+                                                                    let _ = async_cx.update(
+                                                                        |window, app_cx| {
+                                                                            BackupPanel::finish_sync(
+                                                                                entity.clone(),
+                                                                                Err("内部错误：云端数据缺失".to_string()),
+                                                                                window,
+                                                                                app_cx,
+                                                                            );
+                                                                        },
+                                                                    );
+                                                                    return;
+                                                                };
+                                                                let entity_c = entity.clone();
+                                                                let client_c = client.clone();
+                                                                let cfg_c = cfg.clone();
+                                                                let local_c = local.clone();
+                                                                let remote_c = remote.clone();
+                                                                let _ = async_cx.update(
+                                                                    move |window, app_cx| {
+                                                                        window.open_alert_dialog(
+                                                                            app_cx,
+                                                                            move |alert, _window, _cx| {
+                                                                                // open_alert_dialog 的构建闭包和两个按钮回调都是 Fn，
+                                                                                // 每次调用重新克隆一份，供各自按 move 捕获
+                                                                                let (entity_ok, client_ok, cfg_ok, remote_ok) = (
+                                                                                    entity_c.clone(),
+                                                                                    client_c.clone(),
+                                                                                    cfg_c.clone(),
+                                                                                    remote_c.clone(),
+                                                                                );
+                                                                                let (entity_keep, client_keep, cfg_keep, local_keep) = (
+                                                                                    entity_c.clone(),
+                                                                                    client_c.clone(),
+                                                                                    cfg_c.clone(),
+                                                                                    local_c.clone(),
+                                                                                );
+                                                                                alert
+                                                                                    .title("同步冲突")
+                                                                                    .description(format!(
+                                                                                        "本地与云端在上次同步后都有修改（本地 {}，云端 {}）。用云端数据覆盖本地，还是保留本地数据？",
+                                                                                        local_c.exported_at,
+                                                                                        remote_c.exported_at,
+                                                                                    ))
+                                                                                    .ok_text("用云端覆盖本地")
+                                                                                    .ok_variant(ButtonVariant::Danger)
+                                                                                    .cancel_text("保留本地")
+                                                                                    .show_cancel(true)
+                                                                                    // 只能点按钮，避免 Esc 误触触发同步
+                                                                                    .keyboard(false)
+                                                                                    .on_ok(
+                                                                                        move |_, window, cx| {
+                                                                                            BackupPanel::finalize(
+                                                                                                entity_ok.clone(),
+                                                                                                client_ok.clone(),
+                                                                                                cfg_ok.clone(),
+                                                                                                remote_ok.clone(),
+                                                                                                "已用云端数据覆盖本地",
+                                                                                                window,
+                                                                                                cx,
+                                                                                            );
+                                                                                            true
+                                                                                        },
+                                                                                    )
+                                                                                    .on_cancel(
+                                                                                        move |_, window, cx| {
+                                                                                            BackupPanel::finalize(
+                                                                                                entity_keep.clone(),
+                                                                                                client_keep.clone(),
+                                                                                                cfg_keep.clone(),
+                                                                                                local_keep.clone(),
+                                                                                                "已保留本地数据（未覆盖）",
+                                                                                                window,
+                                                                                                cx,
+                                                                                            );
+                                                                                            true
+                                                                                        },
+                                                                                    )
+                                                                            },
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }
+                                                            SyncDecision::PushLocal => {
+                                                                // 3) 上传本地数据覆盖云端
+                                                                let _ = async_cx.update(
+                                                                    move |window, app_cx| {
+                                                                        BackupPanel::finalize(
+                                                                            entity.clone(),
+                                                                            client.clone(),
+                                                                            cfg.clone(),
+                                                                            local,
+                                                                            "已用本地数据覆盖云端",
+                                                                            window,
+                                                                            app_cx,
+                                                                        );
+                                                                    },
+                                                                );
+                                                            }
+                                                            SyncDecision::PullRemote => {
+                                                                // 4) 拉取云端数据覆盖本地
+                                                                let remote = match remote {
+                                                                    Some(r) => r,
+                                                                    None => {
+                                                                        let _ =
+                                                                            async_cx.update(
+                                                                                |window,
+                                                                                 app_cx| {
+                                                                                    BackupPanel::finalize(
+                                                                                        entity.clone(),
+                                                                                        client.clone(),
+                                                                                        cfg.clone(),
+                                                                                        local,
+                                                                                        "已同步，本地与云端均为最新",
+                                                                                        window,
+                                                                                        app_cx,
+                                                                                    );
+                                                                                },
+                                                                            );
+                                                                        return;
+                                                                    }
+                                                                };
+                                                                let _ = async_cx.update(
+                                                                    move |window, app_cx| {
+                                                                        BackupPanel::finalize(
+                                                                            entity.clone(),
+                                                                            client.clone(),
+                                                                            cfg.clone(),
+                                                                            remote,
+                                                                            "已用云端数据覆盖本地",
+                                                                            window,
+                                                                            app_cx,
+                                                                        );
+                                                                    },
+                                                                );
                                                             }
                                                         }
-                                                        Err(e) => Err(e),
-                                                    };
-                                                // 4) 应用到本地并更新状态（结果在对话框内展示）
-                                                let _ = async_cx.update(|window, app_cx| {
-                                                    BackupPanel::finish_sync(
-                                                        entity.clone(),
-                                                        outcome,
-                                                        window,
-                                                        app_cx,
-                                                    );
-                                                });
+                                                    }
+                                                }
                                             })
                                             .detach();
                                         }

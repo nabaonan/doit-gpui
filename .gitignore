@@ -38,3 +38,4 @@ target
 .agents/
 .claude/
 skills-lock.json
+.dsh-vision-router/
