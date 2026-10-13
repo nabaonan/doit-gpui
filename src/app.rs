@@ -19,7 +19,7 @@ use gpui_kit::component::IndexPath;
 use gpui_kit::component::{
     ActiveTheme, Icon, IconName, Sizable, Theme, ThemeMode, WindowExt,
     button::Button,
-    input::{Input, InputState, InputEvent},
+    input::{Input, InputState, InputEvent, AnyInputState},
     menu::{ContextMenuExt, PopupMenuItem},
 };
 use gpui_kit::prelude::*;
@@ -470,6 +470,9 @@ impl DoitApp {
         self.edit_input.update(cx, |s, cx| {
             s.set_value(SharedString::from(content), window, cx);
         });
+        // 进入内联编辑后立即把光标放进输入框（右键「编辑」/「添加子任务」都走这里）。
+        let handle = AnyInputState::from(self.edit_input.clone()).focus_handle(cx);
+        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -868,6 +871,15 @@ impl DoitApp {
             // 12px padding, one extra indent step per depth (16px/level).
             .when(depth > 0, |el| el.pl(px(12. + SUBTASK_INDENT * depth as f32)))
             .hover(|s| s.bg(cx.theme().muted))
+            // 右键打开上下文菜单那一帧，gpui 的菜单会在 prepaint 阶段抢占焦点，而此前
+            // 聚焦的输入框在本帧更早的 prepaint 里已上报过 a11y 焦点，两处 set_focus
+            // 触发 gpui 的 "set_focus called more than once" 断言导致 debug 崩溃。
+            // 延迟到下一帧 render 前清焦：菜单成为该帧唯一焦点；菜单关闭时 gpui 仍会
+            // 恢复这里保存的原焦点（previous_focus 在事件阶段就已捕获，不受影响）。
+            .on_mouse_down(gpui::MouseButton::Right, |_event, window, cx| {
+                // 延迟清焦，让菜单成为下一帧唯一 a11y 焦点（见上方说明）。
+                window.defer(cx, |window, cx| window.blur(cx));
+            })
             .context_menu({
                 let id_for_menu = id.clone();
                 let menu_tags = tags.to_vec();

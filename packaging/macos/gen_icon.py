@@ -20,20 +20,34 @@ OUT_DIR = os.path.dirname(os.path.abspath(__file__)) if len(sys.argv) < 2 else s
 
 SIZE = 1024            # master size in px
 SS = 2                 # supersampling factor (samples per axis per pixel)
-R = 0.228              # rounded-rect corner radius (fraction of width)
+# Colored rounded square spans FILL of the canvas per side; the rest is margin.
+# Full-bleed (FILL=1) reads much bigger next to other dock icons; the green
+# reference icon's fill is ~87.5% of its cell (measured 112/128 px in a row of
+# equal-size icons), so 0.875 (= 6.25% margin per side) matches its size.
+FILL = 0.875
+R = 0.228              # rounded-rect corner radius (as fraction of the FILL box)
 CHECK_T = 0.042        # check stroke half-thickness (fraction of width); thinner
                        # than before (0.052) so the glyph reads lighter, in the
                        # style of the green reference icon
+GRAD = 0.10            # diagonal highlight strength: top-left lighter than
+                       # bottom-right, like the green reference's subtle gradient
 BLUE = (59, 130, 246)  # #3B82F6
 WHITE = (255, 255, 255)
 
 
-def rect_sdf(px: float, py: float) -> float:
-    """Signed distance to a centered rounded square in normalized [-0.5, 0.5] space."""
-    qx = abs(px) - (0.5 - R)
-    qy = abs(py) - (0.5 - R)
+def rect_sdf(px: float, py: float, h: float, r: float) -> float:
+    """Signed distance to a centered rounded square of half-extent `h` and
+    corner radius `r` (normalized [-0.5, 0.5] space by convention)."""
+    qx = abs(px) - (h - r)
+    qy = abs(py) - (h - r)
     ax, ay = max(qx, 0.0), max(qy, 0.0)
-    return math.hypot(ax, ay) + min(max(qx, qy), 0.0) - R
+    return math.hypot(ax, ay) + min(max(qx, qy), 0.0) - r
+
+
+def rect_sdf_fill(px: float, py: float) -> float:
+    """SDF of the inset colored rounded square (sized by FILL)."""
+    h = 0.5 * FILL
+    return rect_sdf(px, py, h, R * FILL)
 
 
 def seg_dist(px, py, ax, ay, bx, by):
@@ -67,13 +81,18 @@ def render_pixel(x: int, y: int):
             v = (y + (j + 0.5) / SS) / SIZE
             px = u - 0.5
             py = v - 0.5
-            if rect_sdf(px, py) > 0:
+            if rect_sdf_fill(px, py) > 0:
                 continue
             alpha = 1.0
             if check_sdf(px, py) <= 0:
                 cr, cg, cb = WHITE
             else:
-                cr, cg, cb = BLUE
+                # Subtle diagonal gradient: light at top-left, darker toward
+                # bottom-right (macOS-style, like the green reference icon).
+                h = 0.5 * FILL
+                diag = ((px + h) / (2.0 * h) + (py + h) / (2.0 * h)) / 2.0
+                f = 1.0 - GRAD * diag
+                cr, cg, cb = BLUE[0] * f, BLUE[1] * f, BLUE[2] * f
             r += cr * alpha
             g += cg * alpha
             b += cb * alpha
