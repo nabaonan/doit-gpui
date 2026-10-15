@@ -28,7 +28,7 @@ use gpui_kit::gpui::{
     ParentElement, Render, SharedString, Styled, Subscription, Window, WindowAppearance, px,
     ElementId,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 // ── Global handle for context-menu callbacks ────────────────────────────────
 
@@ -1572,6 +1572,7 @@ impl DoitApp {
             .p_4()
             .child(div().text_lg().font_bold().child("统计"))
             .child(self.render_stats_controls(cx))
+            .child(self.render_heatmap(cx))
             .child(
                 div()
                     .flex()
@@ -1668,6 +1669,173 @@ impl DoitApp {
                         ),
                     ),
             )
+    }
+
+    /// GitHub-style heatmap: one cell per day for the last 52 weeks; the more
+    /// todos completed on a day, the deeper green that cell. Matches the
+    /// "每日完成热点图" reference card (month axis on top, weekday labels on
+    /// the left, 少/多 legend on the right).
+    fn render_heatmap(&self, cx: &Context<Self>) -> impl IntoElement {
+        let today = Local::now().date_naive();
+        let this_monday = today - Days::new(today.weekday().num_days_from_monday() as u64);
+        let start = this_monday - Days::new(51 * 7);
+        let end = this_monday + Days::new(6);
+
+        // Per-day completed counts across [start, end], built in one pass.
+        let mut counts: HashMap<NaiveDate, usize> = HashMap::new();
+        let mut total = 0usize;
+        for t in &self.todos {
+            if !(t.completed && t.completed_at.is_some()) {
+                continue;
+            }
+            let day = t
+                .completed_at
+                .as_deref()
+                .and_then(|iso| NaiveDate::parse_from_str(&date_part(iso), "%Y-%m-%d").ok());
+            if let Some(d) = day {
+                if d >= start && d <= end {
+                    *counts.entry(d).or_default() += 1;
+                    total += 1;
+                }
+            }
+        }
+        let active = counts.values().filter(|&&n| n > 0).count();
+
+        let bg = cx.theme().background;
+        let mute = cx.theme().muted_foreground;
+        let accent = cx.theme().success;
+        // 5-step ramp: empty -> faint -> deeper greens -> full accent.
+        let empty_c = bg.blend(mute.alpha(0.18));
+        let c1 = bg.blend(accent.alpha(0.28));
+        let c2 = bg.blend(accent.alpha(0.5));
+        let c3 = bg.blend(accent.alpha(0.75));
+        let heat_color = |n: usize| -> Hsla {
+            match n {
+                0 => empty_c,
+                1 => c1,
+                2..=3 => c2,
+                4..=5 => c3,
+                _ => accent,
+            }
+        };
+
+        // Label each column owned by the week whose Monday falls in the first
+        // few days of its month (column 0 always labelled).
+        let mut month_cols: HashMap<usize, String> = HashMap::new();
+        for w in 0..52 {
+            let monday = start + Days::new(w as u64 * 7);
+            if w == 0 || monday.day() <= 7 {
+                month_cols.insert(w, format!("{}月", monday.month()));
+            }
+        }
+
+        let cell = |row: usize| -> AnyElement {
+            div()
+                .flex()
+                .flex_1()
+                .gap_1()
+                .children((0..52).map(|w| {
+                    let day = start + Days::new(w as u64 * 7 + row as u64);
+                    let c = if day > today { bg } else { heat_color(*counts.get(&day).unwrap_or(&0)) };
+                    div().flex_1().min_w_0().h(px(10.)).rounded(px(2.)).bg(c).into_any_element()
+                }))
+                .into_any_element()
+        };
+
+        let rows: Vec<AnyElement> = (0..7)
+            .map(|row| {
+                let weekday = ["一", "", "三", "", "五", "", ""][row];
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .h(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .whitespace_nowrap()
+                            .text_xs()
+                            .text_color(mute)
+                            .child(weekday),
+                    )
+                    .child(cell(row))
+                    .into_any_element()
+            })
+            .collect();
+
+        // Month labels sit above their grid column inside the same 52-column
+        // flex line. `whitespace_nowrap` keeps them on one horizontal line —
+        // without it the narrow flex slot wraps each label into stacked glyphs.
+        let month_row = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(div().w(px(16.)))
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .gap_1()
+                    .children((0..52).map(|w| {
+                        div().flex_1().min_w_0()
+                            .when_some(month_cols.get(&w), |el, label| {
+                                el.whitespace_nowrap()
+                                    .text_xs()
+                                    .text_color(mute)
+                                    .child(label.clone())
+                            })
+                            .into_any_element()
+                    })),
+            );
+
+        let legend = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .child(div().text_xs().whitespace_nowrap().text_color(mute).child("少"))
+            .children([empty_c, c1, c2, c3, accent].into_iter().map(|c| {
+                div().size_2().rounded(px(2.)).bg(c).into_any_element()
+            }))
+            .child(div().text_xs().whitespace_nowrap().text_color(mute).child("多"));
+
+        let border = cx.theme().border;
+        let radius = cx.theme().radius_lg;
+        div()
+            .w_full()
+            .border_1()
+            .border_color(border)
+            .rounded(radius)
+            .p_4()
+            .v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_sm().font_bold().child("每日完成热点图"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(mute)
+                            .child(format!("最近 52 周 · 共完成 {total} 个待办 · 活跃 {active} 天")),
+                    ),
+            )
+            .child(month_row)
+            .child(div().v_flex().gap_1().children(rows))
+            .child(legend)
+            .when(active == 0, |el| {
+                el.child(
+                    div()
+                        .text_sm()
+                        .text_color(mute)
+                        .child("还没有完成记录，完成一条待办即可点亮你的第一格。"),
+                )
+            })
     }
 
     /// Range quick buttons + month navigation at the top of statistics.

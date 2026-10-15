@@ -15,15 +15,18 @@ use gpui_kit::component::{
     switch::Switch,
 };
 use gpui_kit::prelude::*;
+use futures::AsyncReadExt;
 use std::sync::Arc;
 use gpui_kit::gpui::{
     div, App, Context, Entity, FocusHandle,
     IntoElement, KeyDownEvent, Keystroke, Modifiers, ParentElement, PathPromptOptions, Render,
     SharedString, Styled, Subscription, Window, px, ElementId,
 };
+use gpui_kit::gpui::http_client::{AsyncBody, HttpClient, Method, Request, StatusCode};
 use crate::app::DoitAppHandle;
 use crate::label_dialogs::{CategoriesPanel, TagsPanel};
 use crate::types::*;
+use std::cmp::Ordering;
 use crate::webdav::{self, TransferState};
 
 // ── Section navigation ──────────────────────────────────────────────────────
@@ -90,6 +93,7 @@ pub struct SettingsPanel {
     recording: bool,
     recording_handle: FocusHandle,
     sync_test: TransferState,
+    checking_update: bool,
     categories_panel: Entity<CategoriesPanel>,
     tags_panel: Entity<TagsPanel>,
 
@@ -180,6 +184,7 @@ impl SettingsPanel {
             recording: false,
             recording_handle: cx.focus_handle(),
             sync_test: TransferState::Idle,
+            checking_update: false,
             categories_panel,
             tags_panel,
             _subs: subs,
@@ -1056,9 +1061,15 @@ impl SettingsPanel {
                 Button::new("check-update")
                     .small()
                     .outline()
-                    .disabled(true)
-                    .tooltip("暂不支持")
-                    .label("检查更新"),
+                    .label(if self.checking_update { "检查中…" } else { "检查更新" })
+                    .disabled(self.checking_update)
+                    .on_click({
+                        let entity = cx.entity();
+                        let client = cx.http_client();
+                        move |_, window, cx| {
+                            run_update_check(entity.clone(), client.clone(), window, cx)
+                        }
+                    }),
             )
             .child(
                 div()
@@ -1066,6 +1077,130 @@ impl SettingsPanel {
                     .text_color(cx.theme().muted_foreground)
                     .child("用 GPUI Kit 纯 Rust 重写的 Doit 桌面待办应用。"),
             )
+    }
+}
+
+// ── Check for updates (GitHub releases) ────────────────────────────────────
+
+/// GitHub latest-release JSON fields we consume.
+const RELEASES_API: &str = "https://api.github.com/repos/nabaonan/doit-gpui/releases/latest";
+
+fn run_update_check(
+    entity: Entity<SettingsPanel>,
+    client: Arc<dyn HttpClient>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    entity.update(cx, |p, cx| {
+        p.checking_update = true;
+        cx.notify();
+    });
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let _ = window.spawn(&*cx, async move |async_cx| {
+        let outcome = check_latest_release(client.as_ref()).await;
+        let _ = async_cx.update(move |window, app_cx| {
+            entity.update(app_cx, |p, cx| {
+                p.checking_update = false;
+                cx.notify();
+            });
+            let current = current.clone();
+            match outcome {
+                Ok((tag, url, notes)) => {
+                    let tag_v = tag.trim_start_matches(['v', 'V']);
+                    if cmp_version(tag_v, &current) == Ordering::Greater {
+                        let title = format!("发现新版本 {tag}");
+                        let mut desc = format!("当前版本 v{current}。{}", shorten(&notes, 300));
+                        if notes.chars().count() > 300 {
+                            desc.push('…');
+                        }
+                        window.open_alert_dialog(app_cx, move |alert, _w, _c| {
+                            let url = url.clone();
+                            alert
+                                .title(title.clone())
+                                .description(desc.clone())
+                                .ok_text("前往下载")
+                                .cancel_text("暂不")
+                                .show_cancel(true)
+                                .on_ok(move |_, _w, cx| {
+                                    cx.open_url(&url);
+                                    true
+                                })
+                                .on_cancel(|_, _, _| true)
+                        });
+                    } else {
+                        window.open_alert_dialog(app_cx, move |alert, _w, _c| {
+                            alert
+                                .title("已是最新版本")
+                                .description(format!("当前已是最新版本 v{current}。"))
+                        });
+                    }
+                }
+                Err(e) => {
+                    window.open_alert_dialog(app_cx, move |alert, _w, _c| {
+                        alert.title("检查更新失败").description(e.clone())
+                    });
+                }
+            }
+        });
+    });
+}
+
+/// Fetch the latest release from GitHub and surface `(tag_name, html_url, body)`.
+async fn check_latest_release(client: &dyn HttpClient) -> Result<(String, String, String), String> {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(RELEASES_API)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "doit-gpui")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .body(AsyncBody::empty())
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .send(req)
+        .await
+        .map_err(|e| format!("网络请求失败：{}", webdav::classify_transport(e.as_ref())))?;
+    let status = resp.status();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return Err("GitHub API 请求过于频繁，请稍后再试。".into());
+    }
+    if !status.is_success() {
+        return Err(format!("检查更新失败（HTTP {}）", status.as_u16()));
+    }
+    let mut body = resp.into_body();
+    let mut bytes = Vec::new();
+    body.read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("读取更新信息失败：{e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("解析更新信息失败：{e}"))?;
+    let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if tag.is_empty() || url.is_empty() {
+        return Err("未能从仓库获取到有效的版本信息。".into());
+    }
+    Ok((tag, url, notes))
+}
+
+/// Compare dotted-numeric versions ("0.1.7" vs "0.1.10"); non-numeric segments count as 0.
+fn cmp_version(a: &str, b: &str) -> Ordering {
+    let pa: Vec<u64> = a.split('.').filter_map(|s| s.parse().ok()).collect();
+    let pb: Vec<u64> = b.split('.').filter_map(|s| s.parse().ok()).collect();
+    for i in 0..pa.len().max(pb.len()) {
+        match pa.get(i).copied().unwrap_or(0).cmp(&pb.get(i).copied().unwrap_or(0)) {
+            Ordering::Equal => {}
+            o => return o,
+        }
+    }
+    Ordering::Equal
+}
+
+/// Truncate by characters (release notes are markdown, may contain CJK/emoji).
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>().trim_end().to_string()
     }
 }
 
@@ -1162,5 +1297,21 @@ fn shortcut_keystroke(sc: &ShortcutConfig) -> Keystroke {
         },
         key: sc.key.to_string(),
         key_char: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cmp_version;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn version_compare_is_numeric_not_lexical() {
+        assert_eq!(cmp_version("0.1.10", "0.1.9"), Ordering::Greater);
+        assert_eq!(cmp_version("0.1.9", "0.1.10"), Ordering::Less);
+        assert_eq!(cmp_version("0.1.7", "0.1.7"), Ordering::Equal);
+        assert_eq!(cmp_version("0.10.0", "0.9.9"), Ordering::Greater);
+        // missing trailing segments count as 0
+        assert_eq!(cmp_version("0.1.7", "0.1"), Ordering::Greater);
     }
 }

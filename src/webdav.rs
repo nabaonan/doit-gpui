@@ -48,7 +48,7 @@ fn chain_text(err: &dyn std::error::Error) -> String {
 
 /// Classify a transport-level request error into a concrete, actionable message
 /// (DNS, timeout, TLS/certificate, proxy, refused connection, ...).
-fn classify_transport(err: &dyn std::error::Error) -> String {
+pub(crate) fn classify_transport(err: &dyn std::error::Error) -> String {
     let mut text = err.to_string();
     let mut cur = err.source();
     while let Some(src) = cur {
