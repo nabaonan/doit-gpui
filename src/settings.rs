@@ -93,7 +93,7 @@ pub struct SettingsPanel {
     recording: bool,
     recording_handle: FocusHandle,
     sync_test: TransferState,
-    checking_update: bool,
+    update_state: TransferState,
     categories_panel: Entity<CategoriesPanel>,
     tags_panel: Entity<TagsPanel>,
 
@@ -184,7 +184,7 @@ impl SettingsPanel {
             recording: false,
             recording_handle: cx.focus_handle(),
             sync_test: TransferState::Idle,
-            checking_update: false,
+            update_state: TransferState::Idle,
             categories_panel,
             tags_panel,
             _subs: subs,
@@ -197,6 +197,8 @@ impl SettingsPanel {
         self.active = Section::Appearance;
         self.recording = false;
         self.sync_test = TransferState::Idle;
+        // A floating update request must never leave the button stuck.
+        self.update_state = TransferState::Idle;
 
         let mut set = |st: &Entity<InputState>, value: SharedString| {
             st.update(cx, |s, cx| s.set_value(value, window, cx));
@@ -1058,18 +1060,35 @@ impl SettingsPanel {
                     ),
             )
             .child(
-                Button::new("check-update")
-                    .small()
-                    .outline()
-                    .label(if self.checking_update { "检查中…" } else { "检查更新" })
-                    .disabled(self.checking_update)
-                    .on_click({
-                        let entity = cx.entity();
-                        let client = cx.http_client();
-                        move |_, window, cx| {
-                            run_update_check(entity.clone(), client.clone(), window, cx)
-                        }
-                    }),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        Button::new("check-update")
+                            .small()
+                            .outline()
+                            .label(match self.update_state {
+                                TransferState::Busy => "检查中…".to_string(),
+                                _ => "检查更新".to_string(),
+                            })
+                            .disabled(matches!(self.update_state, TransferState::Busy))
+                            .on_click({
+                                let entity = cx.entity();
+                                move |_, window, cx| {
+                                    // A fresh proxy-aware client: the update check must
+                                    // honour the system proxy to reach api.github.com,
+                                    // unlike the `no_proxy` WebDAV sync client.
+                                    run_update_check(
+                                        entity.clone(),
+                                        crate::http::new_public_http_client(),
+                                        window,
+                                        cx,
+                                    )
+                                }
+                            }),
+                    )
+                    .child(update_state_text(&self.update_state, cx)),
             )
             .child(
                 div()
@@ -1092,61 +1111,95 @@ fn run_update_check(
     cx: &mut App,
 ) {
     entity.update(cx, |p, cx| {
-        p.checking_update = true;
+        p.update_state = TransferState::Busy;
         cx.notify();
     });
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let _ = window.spawn(&*cx, async move |async_cx| {
-        let outcome = check_latest_release(client.as_ref()).await;
-        let _ = async_cx.update(move |window, app_cx| {
-            entity.update(app_cx, |p, cx| {
-                p.checking_update = false;
-                cx.notify();
-            });
-            let current = current.clone();
-            match outcome {
-                Ok((tag, url, notes)) => {
-                    let tag_v = tag.trim_start_matches(['v', 'V']);
-                    if cmp_version(tag_v, &current) == Ordering::Greater {
-                        let title = format!("发现新版本 {tag}");
-                        let mut desc = format!("当前版本 v{current}。{}", shorten(&notes, 300));
-                        if notes.chars().count() > 300 {
-                            desc.push('…');
+    window
+        .spawn(&*cx, async move |async_cx| {
+            let outcome = check_latest_release(client.as_ref()).await;
+            let _ = async_cx.update(move |window, app_cx| {
+                let current = current.clone();
+                let state = match outcome {
+                    Ok(rel) => {
+                        let tag_v = rel.tag.trim_start_matches(['v', 'V']);
+                        if cmp_version(tag_v, &current) == Ordering::Greater {
+                            let arch = current_asset_key();
+                            let title = format!("发现新版本 {}", rel.tag);
+                            let mut desc = format!("当前版本 v{current}（{}）。", arch);
+                            if let Some(name) = rel.asset_name.as_deref() {
+                                desc.push_str(&format!("将下载安装包：{name}。"));
+                            }
+                            let notes = shorten(&rel.notes, 220);
+                            desc.push_str(&notes);
+                            if rel.notes.chars().count() > 220 {
+                                desc.push('…');
+                            }
+                            // Download the arch-specific asset when one exists,
+                            // otherwise fall back to the release page.
+                            let download_url =
+                                rel.asset_url.clone().unwrap_or_else(|| rel.page_url.clone());
+                            let ok_label =
+                                if rel.asset_url.is_some() { "前往下载" } else { "前往发布页" };
+                            window.open_alert_dialog(app_cx, move |alert, _w, _c| {
+                                let url = download_url.clone();
+                                alert
+                                    .title(title.clone())
+                                    .description(desc.clone())
+                                    .ok_text(ok_label)
+                                    .cancel_text("暂不")
+                                    .show_cancel(true)
+                                    .on_ok(move |_, _w, cx| {
+                                        cx.open_url(&url);
+                                        true
+                                    })
+                                    .on_cancel(|_, _, _| true)
+                            });
+                            TransferState::Ok(format!("发现新版本 {}", rel.tag))
+                        } else {
+                            TransferState::Ok(format!("已是最新版本 v{current}"))
                         }
-                        window.open_alert_dialog(app_cx, move |alert, _w, _c| {
-                            let url = url.clone();
-                            alert
-                                .title(title.clone())
-                                .description(desc.clone())
-                                .ok_text("前往下载")
-                                .cancel_text("暂不")
-                                .show_cancel(true)
-                                .on_ok(move |_, _w, cx| {
-                                    cx.open_url(&url);
-                                    true
-                                })
-                                .on_cancel(|_, _, _| true)
-                        });
-                    } else {
-                        window.open_alert_dialog(app_cx, move |alert, _w, _c| {
-                            alert
-                                .title("已是最新版本")
-                                .description(format!("当前已是最新版本 v{current}。"))
-                        });
                     }
-                }
-                Err(e) => {
-                    window.open_alert_dialog(app_cx, move |alert, _w, _c| {
-                        alert.title("检查更新失败").description(e.clone())
-                    });
-                }
-            }
-        });
-    });
+                    Err(e) => TransferState::Err(format!("检查更新失败：{e}")),
+                };
+                entity.update(app_cx, |p, cx| {
+                    p.update_state = state;
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
 }
 
-/// Fetch the latest release from GitHub and surface `(tag_name, html_url, body)`.
-async fn check_latest_release(client: &dyn HttpClient) -> Result<(String, String, String), String> {
+/// A release that may offer an install package for the current platform.
+#[derive(Debug)]
+struct LatestRelease {
+    tag: String,
+    page_url: String,
+    notes: String,
+    asset_name: Option<String>,
+    asset_url: Option<String>,
+}
+
+/// Which `{os}-{arch}` asset key this build should download, e.g. `macos-arm64`.
+/// Mirrors the release file naming: `doit-gpui-<ver>-<os>-<arch>.<ext>`.
+fn current_asset_key() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" | "arm64" => "arm64",
+        "x86_64" | "x64" => "x64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+/// Fetch the latest release from GitHub and pick the asset for this platform.
+async fn check_latest_release(client: &dyn HttpClient) -> Result<LatestRelease, String> {
     let req = Request::builder()
         .method(Method::GET)
         .uri(RELEASES_API)
@@ -1174,12 +1227,31 @@ async fn check_latest_release(client: &dyn HttpClient) -> Result<(String, String
     let v: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| format!("解析更新信息失败：{e}"))?;
     let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let page_url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    if tag.is_empty() || url.is_empty() {
+
+    // The release ships per-arch packages (`-macos-arm64.dmg`, `-macos-x64.dmg`,
+    // `-linux-x64.tar.gz`, `-windows-x64.zip`); pick the one matching this build.
+    let key = format!("-{}", current_asset_key());
+    let mut asset_name = None;
+    let mut asset_url = None;
+    if let Some(assets) = v.get("assets").and_then(|a| a.as_array()) {
+        for a in assets {
+            let Some(name) = a.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            if name.contains(&key) {
+                asset_name = Some(name.to_string());
+                asset_url =
+                    a.get("browser_download_url").and_then(|u| u.as_str()).map(|u| u.to_string());
+                break;
+            }
+        }
+    }
+    if tag.is_empty() || page_url.is_empty() {
         return Err("未能从仓库获取到有效的版本信息。".into());
     }
-    Ok((tag, url, notes))
+    Ok(LatestRelease { tag, page_url, notes, asset_name, asset_url })
 }
 
 /// Compare dotted-numeric versions ("0.1.7" vs "0.1.10"); non-numeric segments count as 0.
@@ -1259,8 +1331,7 @@ fn is_cert_error(state: &TransferState) -> bool {
 }
 
 /// The live status line under the sync test button.
-fn sync_state_text(state: &TransferState, cx: &App) -> impl IntoElement {
-    match state {
+fn sync_state_text(state: &TransferState, cx: &App) -> impl IntoElement {    match state {
         TransferState::Idle => div()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
@@ -1284,10 +1355,31 @@ fn sync_state_text(state: &TransferState, cx: &App) -> impl IntoElement {
     }
 }
 
+/// The live status line next to the update-check button.
+fn update_state_text(state: &TransferState, cx: &App) -> impl IntoElement {
+    match state {
+        TransferState::Idle => div().into_any_element(),
+        TransferState::Busy => div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child("正在请求 GitHub 最新版本…")
+            .into_any_element(),
+        TransferState::Ok(msg) => div()
+            .text_xs()
+            .text_color(cx.theme().success)
+            .child(msg.clone())
+            .into_any_element(),
+        TransferState::Err(msg) => div()
+            .text_xs()
+            .text_color(cx.theme().danger)
+            .child(msg.clone())
+            .into_any_element(),
+    }
+}
+
 /// Build the `Keystroke` a `ShortcutConfig` describes, so it can be shown as
 /// a native `Kbd` chip (or parsed back into an action binding).
-fn shortcut_keystroke(sc: &ShortcutConfig) -> Keystroke {
-    Keystroke {
+fn shortcut_keystroke(sc: &ShortcutConfig) -> Keystroke {    Keystroke {
         modifiers: Modifiers {
             control: sc.ctrl,
             alt: sc.alt,
@@ -1304,6 +1396,7 @@ fn shortcut_keystroke(sc: &ShortcutConfig) -> Keystroke {
 mod tests {
     use super::cmp_version;
     use std::cmp::Ordering;
+
 
     #[test]
     fn version_compare_is_numeric_not_lexical() {

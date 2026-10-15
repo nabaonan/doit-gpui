@@ -14,6 +14,7 @@ use gpui_kit::component::select::{
 };
 use gpui_kit::component::chart::{BarChart, LineChart, PieChart};
 use gpui_kit::component::marker::Marker;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::Colorize;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::{
@@ -1736,8 +1737,28 @@ impl DoitApp {
                 .gap_1()
                 .children((0..52).map(|w| {
                     let day = start + Days::new(w as u64 * 7 + row as u64);
-                    let c = if day > today { bg } else { heat_color(*counts.get(&day).unwrap_or(&0)) };
-                    div().flex_1().min_w_0().h(px(10.)).rounded(px(2.)).bg(c).into_any_element()
+                    let n = *counts.get(&day).unwrap_or(&0);
+                    let c = if day > today { bg } else { heat_color(n) };
+                    let cell_el = div()
+                        .id(ElementId::NamedInteger(
+                            "heatmap-cell".into(),
+                            (row * 52 + w) as u64,
+                        ))
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(10.))
+                        .rounded(px(2.))
+                        .bg(c);
+                    // Hover a completed day to see the exact date and count.
+                    let cell_el = if n > 0 {
+                        cell_el.tooltip(move |window, cx| {
+                            Tooltip::new(format!("{}：完成 {} 个待办", day.format("%Y-%m-%d"), n))
+                                .build(window, cx)
+                        })
+                    } else {
+                        cell_el
+                    };
+                    cell_el.into_any_element()
                 }))
                 .into_any_element()
         };

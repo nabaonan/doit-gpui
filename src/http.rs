@@ -28,12 +28,19 @@ pub fn set_trust_self_signed(trust: bool) {
     TRUST_SELF_SIGNED.store(trust, Ordering::Relaxed);
 }
 
-fn build_client(relaxed: bool) -> gpui_pre_reqwest::Client {
+fn build_client(relaxed: bool, no_proxy: bool) -> gpui_pre_reqwest::Client {
     let mut builder = gpui_pre_reqwest::Client::builder()
-        .no_proxy()
         .use_rustls_tls()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30));
+    if no_proxy {
+        // Intranet WebDAV (private NAS) must not go through the OS/company
+        // proxy — that is the most common reason a LAN sync fails.
+        builder = builder.no_proxy();
+    }
+    // Otherwise honour system/env proxy vars: the GitHub update check needs
+    // the user's proxy (VPN/Clash) to reach `api.github.com` when a direct
+    // connection is blocked.
     if relaxed {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -50,8 +57,18 @@ struct NoProxyRequester {
     runtime: tokio::runtime::Runtime,
 }
 
-/// Build an HTTP client appropriate for WebDAV sync (no proxy, bounded timeouts).
+/// Build the HTTP client used for WebDAV sync (bypasses the proxy).
 pub fn new_http_client() -> Arc<dyn HttpClient> {
+    new_client(true)
+}
+
+/// Build the HTTP client used for public services such as the GitHub update
+/// check (follows system/env proxy configuration).
+pub fn new_public_http_client() -> Arc<dyn HttpClient> {
+    new_client(false)
+}
+
+fn new_client(no_proxy: bool) -> Arc<dyn HttpClient> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -59,8 +76,8 @@ pub fn new_http_client() -> Arc<dyn HttpClient> {
     let handle = runtime.handle().clone();
 
     Arc::new(NoProxyRequester {
-        strict: build_client(false),
-        relaxed: build_client(true),
+        strict: build_client(false, no_proxy),
+        relaxed: build_client(true, no_proxy),
         handle,
         runtime,
     })
