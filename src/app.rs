@@ -14,6 +14,7 @@ use gpui_kit::component::select::{
 };
 use gpui_kit::component::chart::{BarChart, LineChart, PieChart};
 use gpui_kit::component::marker::Marker;
+use gpui_kit::base::{Progress, ProgressIndicator, ProgressTrack};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::Colorize;
 use gpui_kit::component::IndexPath;
@@ -27,10 +28,11 @@ use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
     self, div, AnyElement, App, Hsla, Context, Entity, Global, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, Styled, Subscription, Window, WindowAppearance, px,
-    ElementId,
+    relative, ElementId,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 // ── Global handle for context-menu callbacks ────────────────────────────────
 
 pub struct DoitAppHandle(pub Entity<DoitApp>);
@@ -122,6 +124,10 @@ pub struct DoitApp {
     editing_id: Option<String>,
     edit_input: Entity<InputState>,
     _edit_sub: Subscription,
+
+    /// Long-press completion: the todo currently being held-down and its
+    /// progress fraction (0..=1). Only used in "longpress" completion mode.
+    long_press: Option<(String, f32)>,
 
     /// Top-bar category filter dropdown.
     cat_select: Entity<CatSelectState>,
@@ -226,6 +232,7 @@ impl DoitApp {
             editing_id: None,
             edit_input,
             _edit_sub: edit_sub,
+            long_press: None,
             cat_select,
             _cat_select_sub: cat_select_sub,
         }
@@ -859,6 +866,17 @@ impl DoitApp {
             .and_then(|tid| tags.iter().find(|t| t.id == *tid))
             .map(|t| (t.name.clone(), t.color.clone().into()));
         let is_editing = self.editing_id.as_deref() == Some(&*id);
+        // "长按完成" 模式下：整行是可长按区域，行背景用绿色进度条从左到右填充，
+        // 走到头即 toggle 完成。is_editing / has_children 的行不参与长按。
+        let longpress = self.settings.completion_mode == "longpress";
+        let pressing_frac = if longpress {
+            self.long_press
+                .as_ref()
+                .and_then(|(pid, f)| (pid == &id).then_some(*f))
+        } else {
+            None
+        };
+        let press_secs = (self.settings.long_press_duration.max(1)) as f32;
 
         div()
             .id(ElementId::Name(id.clone().into()))
@@ -868,10 +886,138 @@ impl DoitApp {
             .px(px(12.))
             .py(px(8.))
             .rounded_lg()
+            // 长按模式下的绿色完成进度条作为背景填充，clip 到圆角行。
+            .relative()
+            .overflow_hidden()
+            .when_some(pressing_frac, |el, frac| {
+                el.child(
+                    Progress::new(ElementId::Name(format!("press-{}", &id).into()))
+                        .value(frac * 100.0)
+                        .absolute()
+                        .inset_0()
+                        .h_full()
+                        // gpui component 层的 Progress 自带 transition 平滑动画，
+                        // 逐帧推进 target 会导致指示条永远追不上、视觉走完时间
+                        // 远超设置的秒数。这里用底层三件套（无动画），宽度直接
+                        // 由代码按真实墙钟推进，3 秒恰好在第 3 秒走到头。
+                        // 行的 overflow_hidden 只按矩形裁剪、不按圆角裁剪，故
+                        // track/indicator 需自带与行一致的 rounded_lg（8px）
+                        // 圆角，避免绿色填充左上/左下直角溢出到行外。
+                        .child(
+                            ProgressTrack::new()
+                                .absolute()
+                                .size_full()
+                                .rounded_lg()
+                                .bg(cx.theme().success.opacity(0.2)),
+                        )
+                        .child(
+                            ProgressIndicator::new()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .h_full()
+                                .rounded_lg()
+                                .bg(cx.theme().success)
+                                .w(relative(frac.min(1.0))),
+                        ),
+                )
+            })
             // Nest subtasks under their parent: additive on top of the base
             // 12px padding, one extra indent step per depth (16px/level).
             .when(depth > 0, |el| el.pl(px(12. + SUBTASK_INDENT * depth as f32)))
             .hover(|s| s.bg(cx.theme().muted))
+            // 长按完成模式：整行都是可长按完成区域（父任务/编辑中除外）。
+            .when(longpress && !has_children && !is_editing, |el| {
+                let down_id = id.clone();
+                let secs = press_secs;
+                el.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                    if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                        let app = handle.0.clone();
+                        app.update(cx, |app, cx| {
+                            app.long_press = Some((down_id.clone(), 0.0));
+                            cx.notify();
+                        });
+                        let tick_id = down_id.clone();
+                        window
+                            .spawn(&*cx, async move |async_cx| {
+                                let start = Instant::now();
+                                loop {
+                                    async_cx
+                                        .background_executor()
+                                        .timer(Duration::from_millis(16))
+                                        .await;
+                                    let frac = (start.elapsed().as_secs_f32() / secs).min(1.0);
+                                    let done = frac >= 1.0;
+                                    let keep_going = async_cx
+                                        .update(|_w, app_cx| {
+                                            let mut keep = false;
+                                            if let Some(handle) =
+                                                app_cx.try_global::<DoitAppHandle>()
+                                            {
+                                                let a = handle.0.clone();
+                                                a.update(app_cx, |app, cx| {
+                                                    // 已被 mouse_up / hover out 取消。
+                                                    if app
+                                                        .long_press
+                                                        .as_ref()
+                                                        .map(|(i, _)| i)
+                                                        != Some(&tick_id)
+                                                    {
+                                                        return;
+                                                    }
+                                                    if done {
+                                                        app.long_press = None;
+                                                        app.toggle_todo(&tick_id, cx);
+                                                    } else {
+                                                        app.long_press =
+                                                            Some((tick_id.clone(), frac));
+                                                        cx.notify();
+                                                    }
+                                                    keep = true;
+                                                });
+                                            }
+                                            keep
+                                        })
+                                        .unwrap_or(false);
+                                    if done || !keep_going {
+                                        break;
+                                    }
+                                }
+                            })
+                            .detach();
+                    }
+                })
+                .on_mouse_up(gpui::MouseButton::Left, {
+                    let up_id = id.clone();
+                    move |_, _, cx| {
+                        if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                            let app = handle.0.clone();
+                            app.update(cx, |app, cx| {
+                                if app.long_press.as_ref().map(|(i, _)| i) == Some(&up_id) {
+                                    app.long_press = None;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                })
+                .on_hover({
+                    let out_id = id.clone();
+                    move |hovered, _, cx| {
+                        if !hovered {
+                            if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                let app = handle.0.clone();
+                                app.update(cx, |app, cx| {
+                                    if app.long_press.as_ref().map(|(i, _)| i) == Some(&out_id) {
+                                        app.long_press = None;
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        }
+                    }
+                })
+            })
             // 右键打开上下文菜单那一帧，gpui 的菜单会在 prepaint 阶段抢占焦点，而此前
             // 聚焦的输入框在本帧更早的 prepaint 里已上报过 a11y 焦点，两处 set_focus
             // 触发 gpui 的 "set_focus called more than once" 断言导致 debug 崩溃。
@@ -1090,20 +1236,25 @@ impl DoitApp {
                 },
             )
             .child(
-                Checkbox::new(ElementId::Name(format!("chk-{}", &id).into()))
-                    .checked(completed)
-                    // A parent's completion is derived from its subtasks.
-                    .disabled(has_children)
-                    .on_click({
-                        let id = id.clone();
-                        move |_, _, cx| {
-                            if let Some(handle) = cx.try_global::<DoitAppHandle>() {
-                                let app = handle.0.clone();
-                                app.update(cx, |app, cx| app.toggle_todo(&id, cx));
+                if longpress {
+                    // 长按完成模式：不显示左侧勾选框，改用整行长按 + 绿色进度条。
+                    div().size_3().flex_none().into_any_element()
+                } else {
+                    Checkbox::new(ElementId::Name(format!("chk-{}", &id).into()))
+                        .checked(completed)
+                        // A parent's completion is derived from its subtasks.
+                        .disabled(has_children)
+                        .on_click({
+                            let id = id.clone();
+                            move |_, _, cx| {
+                                if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                    let app = handle.0.clone();
+                                    app.update(cx, |app, cx| app.toggle_todo(&id, cx));
+                                }
                             }
-                        }
-                    })
-                    .into_any_element(),
+                        })
+                        .into_any_element()
+                },
             )
             .child(
                 if is_editing {
