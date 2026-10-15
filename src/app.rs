@@ -14,6 +14,7 @@ use gpui_kit::component::select::{
 };
 use gpui_kit::component::chart::{BarChart, LineChart, PieChart};
 use gpui_kit::component::marker::Marker;
+use gpui_kit::base::animation::{EffectTransition, ease_out_cubic};
 use gpui_kit::base::{Progress, ProgressIndicator, ProgressTrack};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::Colorize;
@@ -26,9 +27,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
-    self, div, AnyElement, App, Hsla, Context, Entity, Global, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, Styled, Subscription, Window, WindowAppearance, px,
-    relative, ElementId,
+    self, div, AnyElement, AnyView, App, Hsla, Context, Entity, Global, InteractiveElement,
+    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    WindowAppearance, px, relative, ElementId,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -560,6 +561,39 @@ impl DoitApp {
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
+
+/// 热力图 hover 提示 view：内容直接使用 gpui 自带 Tooltip 组件渲染
+/// （`Tooltip::new(...).build(...)`，保证样式与内置 tooltip 完全一致）。
+/// 原生 `.tooltip()` 每次进入 hover 都会重建这个 view，因此外层 div 首帧
+/// 播放淡入 + 下滑动画，每次划过都重新渐变出现。
+struct HeatmapTooltip {
+    text: SharedString,
+}
+
+impl HeatmapTooltip {
+    fn new(text: impl Into<SharedString>) -> Self {
+        Self {
+            text: text.into(),
+        }
+    }
+
+    /// Build the tooltip view (matches gpui-kit's `Tooltip::build` contract).
+    fn build(self, _: &mut Window, cx: &mut App) -> AnyView {
+        cx.new(|_| self).into()
+    }
+}
+
+impl Render for HeatmapTooltip {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 用自带组件渲染 tooltip 本体，动画包在外层 div 上。
+        let tooltip = Tooltip::new(self.text.clone()).build(window, cx);
+        EffectTransition::new(Duration::from_millis(150))
+            .ease(ease_out_cubic)
+            .slide_y(px(4.), px(0.))
+            .fade(0.0, 1.0)
+            .apply(div().child(tooltip), "heatmap-tooltip-enter")
+    }
+}
 
 impl Render for DoitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1901,10 +1935,15 @@ impl DoitApp {
                         .rounded(px(2.))
                         .bg(c);
                     // Hover a completed day to see the exact date and count.
+                    // 使用 gpui 原生 tooltip 挂载 + 自带组件外观 + 入场动画。
                     let cell_el = if n > 0 {
                         cell_el.tooltip(move |window, cx| {
-                            Tooltip::new(format!("{}：完成 {} 个待办", day.format("%Y-%m-%d"), n))
-                                .build(window, cx)
+                            HeatmapTooltip::new(format!(
+                                "{}：完成 {} 个待办",
+                                day.format("%Y-%m-%d"),
+                                n
+                            ))
+                            .build(window, cx)
                         })
                     } else {
                         cell_el
