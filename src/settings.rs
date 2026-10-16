@@ -10,6 +10,7 @@ use gpui_kit::component::{
     input::{Input, InputState, InputEvent},
     kbd::Kbd,
     notification::Notification,
+    progress::Progress,
     radio::RadioGroup,
     setting::{SettingGroup, SettingItem, SettingPage, Settings},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
@@ -47,6 +48,8 @@ pub struct SettingsPanel {
     recording_handle: FocusHandle,
     sync_test: TransferState,
     update_state: TransferState,
+    /// In-app update download progress (frac 0..1); None when idle.
+    download: Option<DownloadState>,
     categories_panel: Entity<CategoriesPanel>,
     tags_panel: Entity<TagsPanel>,
 
@@ -137,6 +140,7 @@ impl SettingsPanel {
             recording_handle: cx.focus_handle(),
             sync_test: TransferState::Idle,
             update_state: TransferState::Idle,
+            download: None,
             categories_panel,
             tags_panel,
             _subs: subs,
@@ -1142,6 +1146,35 @@ impl SettingsPanel {
                                     )
                                     .child(update_state_text(&update_state, cx)),
                             )
+                            .when_some(
+                                about_entity.read(cx).download.clone(),
+                                |el, dl| {
+                                    el.child(
+                                        div()
+                                            .v_flex()
+                                            .gap_1()
+                                            .w_full()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(format!("正在下载 {}", dl.file))
+                                                    .child(if dl.done {
+                                                        "下载完成，正在打开安装包…".to_string()
+                                                    } else {
+                                                        format!("{:.0}%", dl.frac * 100.0)
+                                                    }),
+                                            )
+                                            .child(
+                                                Progress::new("update-download-progress")
+                                                    .value(dl.frac * 100.0),
+                                            ),
+                                    )
+                                },
+                            )
                             .child(
                                 div()
                                     .text_sm()
@@ -1193,18 +1226,36 @@ fn run_update_check(
                             // otherwise fall back to the release page.
                             let download_url =
                                 rel.asset_url.clone().unwrap_or_else(|| rel.page_url.clone());
+                            let asset_name = rel.asset_name.clone();
                             let ok_label =
                                 if rel.asset_url.is_some() { "前往下载" } else { "前往发布页" };
+                            let entity_for_dl = entity.clone();
                             window.open_alert_dialog(app_cx, move |alert, _w, _c| {
                                 let url = download_url.clone();
+                                let has_asset = asset_name.is_some();
+                                let asset_file = asset_name.clone().unwrap_or_default();
+                                let entity_for_ok = entity_for_dl.clone();
                                 alert
                                     .title(title.clone())
                                     .description(desc.clone())
                                     .ok_text(ok_label)
                                     .cancel_text("暂不")
                                     .show_cancel(true)
-                                    .on_ok(move |_, _w, cx| {
-                                        cx.open_url(&url);
+                                    .on_ok(move |_, window, cx| {
+                                        if has_asset {
+                                            // 有安装包：直接在当前应用内下载（about 页显示
+                                            // 进度条），下载完成后自动用系统默认方式打开安装包。
+                                            start_update_download(
+                                                entity_for_ok.clone(),
+                                                &url,
+                                                &asset_file,
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            // 没有可下载的安装包：打开 GitHub 发布页。
+                                            cx.open_url(&url);
+                                        }
                                         true
                                     })
                                     .on_cancel(|_, _, _| true)
@@ -1234,6 +1285,154 @@ struct LatestRelease {
     asset_name: Option<String>,
     asset_url: Option<String>,
 }
+
+/// Live state of an in-app update-package download.
+#[derive(Debug, Clone)]
+struct DownloadState {
+    /// 0..1 completed fraction.
+    frac: f32,
+    /// True once the package is saved and being opened for installation.
+    done: bool,
+    /// Human-readable file name being fetched.
+    file: String,
+}
+
+/// Download a release asset inside the app (no browser hop): stream bytes to a
+/// temp file while reporting progress into `download`, then open the package
+/// with the OS default handler (mounts a .dmg) once complete.
+///
+/// The download itself runs on a dedicated Tokio runtime in a background thread
+/// (reqwest can't run on gpui's executor); progress is forwarded over an
+/// mpsc channel back to the UI loop, which updates the panel and re-renders.
+fn start_update_download(
+    entity: Entity<SettingsPanel>,
+    url: &str,
+    file_name: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    entity.update(cx, |p, cx| {
+        p.download = Some(DownloadState {
+            frac: 0.0,
+            done: false,
+            file: file_name.to_string(),
+        });
+        cx.notify();
+    });
+
+    let url = url.to_string();
+    let file_name = file_name.to_string();
+    let dest = std::env::temp_dir().join(&file_name);
+    let (tx, rx) = std::sync::mpsc::channel::<f32>();
+    let dest_for_dl = dest.clone();
+    let downloader = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build();
+        let result = match rt {
+            Ok(rt) => {
+                rt.block_on(download_to_file(&url, &dest_for_dl, |frac| {
+                    let _ = tx.send(frac);
+                }))
+            }
+            Err(e) => Err(format!("初始化下载线程失败：{e}")),
+        };
+        // Closing tx signals the UI loop that the download finished.
+        let _ = result;
+    });
+
+    window.spawn(&*cx, async move |async_cx| {
+        let rx = rx;
+        while let Ok(frac) = rx.recv() {
+            let _ = async_cx.update(|_window, app_cx| {
+                entity.update(app_cx, |p, cx| {
+                    if let Some(dl) = p.download.as_mut() {
+                        dl.frac = frac;
+                    }
+                    cx.notify();
+                });
+            });
+        }
+        let _ = async_cx.update(move |_window, app_cx| {
+            entity.update(app_cx, |p, cx| {
+                if dest.exists() {
+                    p.download = Some(DownloadState {
+                        frac: 1.0,
+                        done: true,
+                        file: file_name.clone(),
+                    });
+                    cx.notify();
+                    // Open the downloaded package for installation (OS-default
+                    // handler: mounts+opens .dmg on macOS).
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "start"
+                    } else {
+                        "xdg-open"
+                    };
+                    let _ = std::process::Command::new(opener).arg(&dest).spawn();
+                } else {
+                    p.download = None;
+                    p.update_state = TransferState::Err("下载安装包失败。".into());
+                    cx.notify();
+                }
+            });
+        });
+        let _ = downloader.join();
+    })
+    .detach();
+}
+
+/// Stream `url` into `dest`, invoking `on_progress` with the 0..1 fraction as
+/// bytes arrive (using Content-Length when the server provides it).
+/// Runs on a Tokio runtime; uses the vendored reqwest client directly to get
+/// an incremental byte stream (the shared [`HttpClient`] buffers full bodies).
+async fn download_to_file(
+    url: &str,
+    dest: &std::path::Path,
+    on_progress: impl Fn(f32),
+) -> Result<std::path::PathBuf, String> {
+    let client = gpui_pre_reqwest::Client::builder()
+        .use_rustls_tls()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("初始化下载客户端失败：{e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("发起下载失败：{e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载请求失败（HTTP {}）", resp.status().as_u16()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    use futures::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut file =
+        std::fs::File::create(dest).map_err(|e| format!("创建临时文件失败：{e}"))?;
+    let mut got: u64 = 0;
+    let mut last_report: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取下载内容失败：{e}"))?;
+        std::io::Write::write_all(&mut file, &chunk).map_err(|e| format!("写入文件失败：{e}"))?;
+        got += chunk.len() as u64;
+        // Cap UI updates to ~every 256 KB to avoid flooding notify.
+        if total == 0 || got - last_report >= 256 * 1024 {
+            on_progress(if total > 0 {
+                (got as f32 / total as f32).min(1.0)
+            } else {
+                0.0
+            });
+            last_report = got;
+        }
+    }
+    if total > 0 {
+        on_progress(1.0);
+    }
+    Ok(dest.to_path_buf())
+}
+
 
 /// Which `{os}-{arch}` asset key this build should download, e.g. `macos-arm64`.
 /// Mirrors the release file naming: `doit-gpui-<ver>-<os>-<arch>.<ext>`.
