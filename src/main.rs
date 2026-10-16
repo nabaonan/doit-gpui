@@ -24,6 +24,8 @@ fn main() {
         .with_assets(AppAssets::new())
         .run(move |cx| {
             gpui_kit::init(cx);
+            // Give the OS identity so system notifications show for the app.
+            cx.set_app_identity("com.doit.gpui", "Doit");
 
             let opts = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

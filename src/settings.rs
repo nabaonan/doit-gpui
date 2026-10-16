@@ -11,6 +11,7 @@ use gpui_kit::component::{
     kbd::Kbd,
     notification::Notification,
     radio::RadioGroup,
+    setting::{SettingGroup, SettingItem, SettingPage, Settings},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
 };
@@ -29,58 +30,10 @@ use crate::types::*;
 use std::cmp::Ordering;
 use crate::webdav::{self, TransferState};
 
-// ── Section navigation ──────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Section {
-    Appearance,
-    Interaction,
-    Sync,
-    Labels,
-    Data,
-    About,
-}
-
-impl Section {
-    fn all() -> [Section; 6] {
-        [
-            Section::Appearance,
-            Section::Interaction,
-            Section::Sync,
-            Section::Labels,
-            Section::Data,
-            Section::About,
-        ]
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Appearance => "外观",
-            Self::Interaction => "交互",
-            Self::Sync => "同步",
-            Self::Labels => "分类与标签",
-            Self::Data => "数据",
-            Self::About => "关于",
-        }
-    }
-
-    fn index(&self) -> u32 {
-        match self {
-            Self::Appearance => 0,
-            Self::Interaction => 1,
-            Self::Sync => 2,
-            Self::Labels => 3,
-            Self::Data => 4,
-            Self::About => 5,
-        }
-    }
-}
-
 // ── Settings Panel ─────────────────────────────────────────────────────────
 
 pub struct SettingsPanel {
     local: AppSettings,
-    active: Section,
 
     url: Entity<InputState>,
     user: Entity<InputState>,
@@ -173,7 +126,6 @@ impl SettingsPanel {
 
         Self {
             local: settings,
-            active: Section::Appearance,
             url,
             user,
             pass,
@@ -194,7 +146,6 @@ impl SettingsPanel {
     /// Copy fresh settings into the panel and reset the text/slider controls.
     pub(crate) fn sync_from(&mut self, settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.local = settings.clone();
-        self.active = Section::Appearance;
         self.recording = false;
         self.sync_test = TransferState::Idle;
         // A floating update request must never leave the button stuck.
@@ -265,461 +216,444 @@ impl SettingsPanel {
 // ── Render ──────────────────────────────────────────────────────────────────
 
 impl Render for SettingsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_root(window, cx)
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
+        Settings::new("app-settings")
+            .sidebar_width(px(180.))
+            .sidebar_size_range(px(140.)..px(240.))
+            .pages([
+                Self::page_appearance(&entity),
+                Self::page_interaction(&entity),
+                Self::page_sync(&entity),
+                Self::page_labels(&entity),
+                Self::page_data(&entity),
+                Self::page_about(&entity),
+            ])
     }
 }
 
 impl SettingsPanel {
-    fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .size_full()
-            .min_w(px(680.))
-            .min_h(px(460.))
-            .child(self.render_nav(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .p_4()
-                    .child(self.render_active(window, cx).into_any_element()),
+    // ── 外观 ──
+
+    fn page_appearance(entity: &Entity<Self>) -> SettingPage {
+        let entity = entity.clone();
+        SettingPage::new("外观")
+            .description("界面主题与配色")
+            .group(
+                SettingGroup::new()
+                    .title("主题")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let theme_ix = match entity.read(cx).local.theme.as_ref() {
+                            "light" => Some(1),
+                            "dark" => Some(2),
+                            _ => Some(0),
+                        };
+                        let entity = entity.clone();
+                        div()
+                            .px_1()
+                            .child(
+                                RadioGroup::horizontal("theme-radios")
+                                    .selected_index(theme_ix)
+                                    .child("系统")
+                                    .child("浅色")
+                                    .child("深色")
+                                    .on_click(move |ix, window, cx| {
+                                        let ix = *ix;
+                                        entity.update(cx, |p, cx| {
+                                            p.local.theme = match ix {
+                                                1 => "light".into(),
+                                                2 => "dark".into(),
+                                                _ => "system".into(),
+                                            };
+                                            p.apply_theme(window, cx);
+                                            cx.notify();
+                                        });
+                                    })
+                            )
+                    })),
             )
-    }
-
-    fn render_nav(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .v_flex()
-            .gap_1()
-            .w(px(116.))
-            .p_2()
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .children(Section::all().iter().map(|sec| {
-                let sec = *sec;
-                Button::new(("section", sec.index()))
-                    .when(self.active == sec, |b| b.selected(true))
-                    .ghost()
-                    .small()
-                    .label(sec.label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.active = sec;
-                        cx.notify();
-                    }))
-            }))
-    }
-
-    fn render_active(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.active {
-            Section::Appearance => self.render_appearance(cx).into_any_element(),
-            Section::Interaction => self.render_interaction(window, cx).into_any_element(),
-            Section::Sync => self.render_sync(window, cx).into_any_element(),
-            Section::Labels => self.render_labels(window, cx).into_any_element(),
-            Section::Data => self.render_data(window, cx).into_any_element(),
-            Section::About => self.render_about(cx).into_any_element(),
-        }
     }
 
     // ── 分类与标签 ──
 
-    fn render_labels(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .v_flex()
-            .gap_4()
-            .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(div().text_sm().font_bold().child("分类"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("点「编辑」修改名称与颜色，勾选默认分类。"),
-                    ),
+    fn page_labels(entity: &Entity<Self>) -> SettingPage {
+        let categories_entity = entity.clone();
+        let tags_entity = entity.clone();
+        SettingPage::new("分类与标签")
+            .description("管理分类与标签的颜色和顺序")
+            .group(
+                SettingGroup::new()
+                    .title("分类")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let panel = categories_entity.read(cx);
+                        div().child(panel.categories_panel.clone())
+                    })),
             )
-            .child(self.categories_panel.clone())
-            .child(div().border_t_1().border_color(cx.theme().border))
-            .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(div().text_sm().font_bold().child("标签"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("点「编辑」修改名称与颜色。"),
-                    ),
-            )
-            .child(self.tags_panel.clone())
-    }
-
-    // ── 外观 ──
-
-    fn render_appearance(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme_ix = match self.local.theme.as_ref() {
-            "light" => Some(1),
-            "dark" => Some(2),
-            _ => Some(0),
-        };
-
-        div()
-            .v_flex()
-            .gap_6()
-            .child(
-                section_block("主题", cx).child(
-                    RadioGroup::horizontal("theme-radios")
-                        .selected_index(theme_ix)
-                        .child("系统")
-                        .child("浅色")
-                        .child("深色")
-                        .on_click({
-                            let entity = cx.entity();
-                            move |ix, window, cx| {
-                                entity.update(cx, |p, cx| {
-                                    p.local.theme = match *ix {
-                                        1 => "light".into(),
-                                        2 => "dark".into(),
-                                        _ => "system".into(),
-                                    };
-                                    p.apply_theme(window, cx);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
+            .group(
+                SettingGroup::new()
+                    .title("标签")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let panel = tags_entity.read(cx);
+                        div().child(panel.tags_panel.clone())
+                    })),
             )
     }
 
     // ── 交互 ──
 
-    fn render_interaction(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mode_ix = if self.local.completion_mode.as_ref() == "longpress" {
-            Some(1)
-        } else {
-            Some(0)
-        };
-        let is_longpress = self.local.completion_mode.as_ref() == "longpress";
-        let is_recording = self.recording;
-        let shortcut = self.local.add_todo_shortcut.clone();
-
-        let shortcut_row = div()
-            .id("shortcut-recorder")
-            .track_focus(&self.recording_handle)
-            .on_key_down({
-                let entity = cx.entity();
-                move |event: &KeyDownEvent, _window, cx| {
-                    if !entity.read(cx).recording {
-                        return;
-                    }
-                    let key = event.keystroke.key.clone();
-                    if key == "escape" {
-                        entity.update(cx, |p, cx| {
-                            p.recording = false;
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    if matches!(
-                        key.as_str(),
-                        "control" | "shift" | "alt" | "meta" | "super" | "command"
-                    ) {
-                        return;
-                    }
-                    let mods = event.keystroke.modifiers;
-                    entity.update(cx, |p, cx| {
-                        p.local.add_todo_shortcut = ShortcutConfig {
-                            key: key.into(),
-                            ctrl: mods.control,
-                            shift: mods.shift,
-                            alt: mods.alt,
-                            meta: mods.platform,
-                        };
-                        p.recording = false;
-                        p.push_settings(cx);
-                        cx.notify();
-                    });
-                }
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(Kbd::new(shortcut_keystroke(&shortcut)))
-                    .child(
-                        Button::new("record-shortcut")
-                            .when(is_recording, |b| b.selected(true))
-                            .ghost()
-                            .small()
-                            .label(if is_recording {
-                                "请按下组合键…".to_string()
-                            } else {
-                                "改键".to_string()
-                            })
-                            .on_click({
-                                let entity = cx.entity();
-                                move |_, window, cx| {
-                                    let handle = {
-                                        let panel = entity.read(cx);
-                                        panel.recording_handle.clone()
-                                    };
-                                    entity.update(cx, |p, cx| {
-                                        p.recording = true;
-                                        cx.notify();
-                                    });
-                                    window.focus(&handle, cx);
-                                }
-                            }),
-                    ),
-            );
-
-        div()
-            .v_flex()
-            .gap_6()
-            .child(
-                section_block("完成方式", cx)
-                    .child(
-                        RadioGroup::horizontal("completion-radios")
-                            .selected_index(mode_ix)
-                            .child("勾选")
-                            .child("长按")
-                            .on_click({
-                                let entity = cx.entity();
-                                move |ix, _window, cx| {
-                                    entity.update(cx, |p, cx| {
-                                        p.local.completion_mode = if *ix == 1 {
-                                            "longpress".into()
-                                        } else {
-                                            "checkbox".into()
-                                        };
-                                        p.push_settings(cx);
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    )
-                    .when(is_longpress, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .w(px(240.))
-                                        .child(Slider::new(&self.long_press)),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .child(format!("{} 秒", self.local.long_press_duration)),
-                                ),
-                        )
-                    }),
-            )
-            .child(section_block("添加快捷键", cx).child(shortcut_row))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("该快捷键用于在输入框中确认新增（待办、分类、标签），默认直接按 Enter 即可。"),
-            )
-    }
-
-    // ── 同步 ──
-
-    fn render_sync(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sync_enabled = self.local.cloud_sync.enabled;
-        let cloud = self.local.cloud_sync.clone();
-        let entity = cx.entity();
-
-        div()
-            .v_flex()
-            .gap_6()
-            .child(
-                row_block("启用云同步", "WebDAV 同步本地数据", cx).child(
-                    Switch::new("cloud-enabled")
-                        .small()
-                        .checked(cloud.enabled)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |checked, _window, cx| {
-                                entity.update(cx, |p, cx| {
-                                    p.local.cloud_sync.enabled = *checked;
-                                    p.push_settings(cx);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
-            )
-            .when(sync_enabled, |el| {
-                el.child(
-                    div()
-                        .v_flex()
-                        .gap_3()
-                        .child(
-                            field_block("WebDAV 地址", cx).child(Input::new(&self.url).small()),
-                        )
-                        .child(field_block("用户名", cx).child(Input::new(&self.user).small()))
-                        .child(field_block("密码", cx).child(Input::new(&self.pass).small()))
-                        .child(
-                            row_block(
-                                "信任自签名证书",
-                                "跳过证书校验（用于自签名 / 内网 NAS）",
-                                cx,
-                            )
+    fn page_interaction(entity: &Entity<Self>) -> SettingPage {
+        let entity = entity.clone();
+        let entity2 = entity.clone();
+        SettingPage::new("交互")
+            .description("完成方式与快捷键")
+            .group(
+                SettingGroup::new()
+                    .title("完成方式")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let is_longpress =
+                            entity.read(cx).local.completion_mode.as_ref() == "longpress";
+                        let mode_ix = if is_longpress { Some(1) } else { Some(0) };
+                        div()
+                            .v_flex()
+                            .gap_3()
                             .child(
-                                Switch::new("trust-self-signed")
-                                    .small()
-                                    .checked(self.local.cloud_sync.trust_self_signed)
+                                RadioGroup::horizontal("completion-radios")
+                                    .selected_index(mode_ix)
+                                    .child("勾选")
+                                    .child("长按")
                                     .on_click({
-                                        let entity = cx.entity();
-                                        move |checked, _window, cx| {
+                                        let entity = entity.clone();
+                                        move |ix, _window, cx| {
+                                            let ix = *ix;
                                             entity.update(cx, |p, cx| {
-                                                p.local.cloud_sync.trust_self_signed = *checked;
-                                                crate::http::set_trust_self_signed(*checked);
+                                                p.local.completion_mode = if ix == 1 {
+                                                    "longpress".into()
+                                                } else {
+                                                    "checkbox".into()
+                                                };
                                                 p.push_settings(cx);
                                                 cx.notify();
                                             });
                                         }
                                     }),
-                            ),
-                        )
-                        .child(self.render_sync_test(&entity, cx)),
-                )
-            })
-            .child(
-                row_block("启动时拉取", "应用启动时从 WebDAV 拉取最新数据", cx).child(
-                    Switch::new("fetch-on-startup")
-                        .small()
-                        .disabled(!sync_enabled)
-                        .checked(cloud.fetch_on_startup)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |checked, _window, cx| {
-                                entity.update(cx, |p, cx| {
-                                    p.local.cloud_sync.fetch_on_startup = *checked;
-                                    p.push_settings(cx);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
+                            )
+                            .when(is_longpress, |el| {
+                                let state = entity.read(cx);
+                                let long_press = state.long_press.clone();
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .w(px(240.))
+                                                .child(Slider::new(&long_press)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .child(format!(
+                                                    "{} 秒",
+                                                    state.local.long_press_duration
+                                                )),
+                                        ),
+                                )
+                            })
+                    })),
             )
-            .child(
-                row_block("关闭时上传", "关闭窗口时自动把本地数据上传到 WebDAV", cx).child(
-                    Switch::new("upload-on-exit")
-                        .small()
-                        .disabled(!sync_enabled)
-                        .checked(cloud.upload_on_exit)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |checked, _window, cx| {
-                                entity.update(cx, |p, cx| {
-                                    p.local.cloud_sync.upload_on_exit = *checked;
-                                    p.push_settings(cx);
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1()
-                            .child(div().text_sm().child("云端保留近"))
+            .group(
+                SettingGroup::new()
+                    .title("添加快捷键")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let state = entity2.read(cx);
+                        let shortcut = state.local.add_todo_shortcut.clone();
+                        let is_recording = state.recording;
+                        let recording_handle = state.recording_handle.clone();
+                        let shortcut_row = div()
+                            .id("shortcut-recorder")
+                            .track_focus(&recording_handle)
+                            .on_key_down({
+                                let entity = entity2.clone();
+                                move |event: &KeyDownEvent, _window, cx| {
+                                    if !entity.read(cx).recording {
+                                        return;
+                                    }
+                                    let key = event.keystroke.key.clone();
+                                    if key == "escape" {
+                                        entity.update(cx, |p, cx| {
+                                            p.recording = false;
+                                            cx.notify();
+                                        });
+                                        return;
+                                    }
+                                    if matches!(
+                                        key.as_str(),
+                                        "control" | "shift" | "alt" | "meta" | "super"
+                                            | "command"
+                                    ) {
+                                        return;
+                                    }
+                                    let mods = event.keystroke.modifiers;
+                                    entity.update(cx, |p, cx| {
+                                        p.local.add_todo_shortcut = ShortcutConfig {
+                                            key: key.into(),
+                                            ctrl: mods.control,
+                                            shift: mods.shift,
+                                            alt: mods.alt,
+                                            meta: mods.platform,
+                                        };
+                                        p.recording = false;
+                                        p.push_settings(cx);
+                                        cx.notify();
+                                    });
+                                }
+                            })
                             .child(
                                 div()
-                                    .text_xs()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Kbd::new(shortcut_keystroke(&shortcut)))
+                                    .child(
+                                        Button::new("record-shortcut")
+                                            .when(is_recording, |b| b.selected(true))
+                                            .ghost()
+                                            .small()
+                                            .label(if is_recording {
+                                                "请按下组合键…".to_string()
+                                            } else {
+                                                "改键".to_string()
+                                            })
+                                            .on_click({
+                                                let entity = entity2.clone();
+                                                move |_, window, cx| {
+                                                    let handle = {
+                                                        let panel = entity.read(cx);
+                                                        panel.recording_handle.clone()
+                                                    };
+                                                    entity.update(cx, |p, cx| {
+                                                        p.recording = true;
+                                                        cx.notify();
+                                                    });
+                                                    window.focus(&handle, cx);
+                                                }
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("0 = 不限制，保留的历史备份条数"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(120.))
-                            .child(Input::new(&self.keep_recent).small().disabled(!sync_enabled)),
-                    ),
-            )
-            .child(div().border_t_1().border_color(cx.theme().border))
-            .child(self.render_schedule("定时备份", &self.local.auto_backup, cx))
-            .child(self.render_schedule("定时恢复", &self.local.auto_restore, cx))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().warning)
-                    .child("提示：自动恢复会覆盖本地数据，请谨慎启用。"),
+                                    .child(
+                                        "该快捷键用于在输入框中确认新增（待办、分类、标签），默认直接按 Enter 即可。",
+                                    ),
+                            );
+                        div().v_flex().gap_2().child(shortcut_row)
+                    })),
             )
     }
 
-    /// A 「测试连接」button plus a live result line, using the typed config.
-    fn render_sync_test(&self, entity: &Entity<Self>, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.sync_test.clone();
-        let entity = entity.clone();
-        let client = cx.http_client();
+    // ── 同步 ──
 
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                Button::new("sync-test")
-                    .small()
-                    .outline()
-                    .label(match state {
-                        TransferState::Busy => "测试中…".to_string(),
-                        _ => "测试连接".to_string(),
-                    })
-                    .disabled(matches!(state, TransferState::Busy))
-                    .on_click({
-                        let entity = entity.clone();
-                        let client = client.clone();
-                        move |_, window, cx| {
-                            let entity = entity.clone();
-                            let client = client.clone();
-                            Self::run_sync_test(entity, client, window, cx);
-                        }
-                    }),
-            )
-            .child(sync_state_text(&state, cx))
-            .when(is_cert_error(&state), |el| {
-                let entity = entity.clone();
-                let client = client.clone();
-                el.child(
-                    Button::new("trust-cert-and-retry")
-                        .small()
-                        .ghost()
-                        .label("信任此证书并重试")
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |p, cx| {
-                                p.local.cloud_sync.trust_self_signed = true;
-                                crate::http::set_trust_self_signed(true);
-                                p.push_settings(cx);
-                                cx.notify();
-                            });
-                            let entity = entity.clone();
-                            let client = client.clone();
-                            Self::run_sync_test(entity, client, window, cx);
+    fn page_sync(entity: &Entity<Self>) -> SettingPage {
+        let connect_entity = entity.clone();
+        let recent_entity = entity.clone();
+        let behavior_entity = entity.clone();
+        let schedule_entity = entity.clone();
+        let schedule_entity2 = entity.clone();
+        SettingPage::new("同步")
+            .description("WebDAV 云同步与定时任务")
+            .group(
+                SettingGroup::new()
+                    .title("连接")
+                    .items([
+                        SettingItem::render(move |_, _window, cx| {
+                            let state = connect_entity.read(cx);
+                            let cloud = state.local.cloud_sync.clone();
+                            let sync_enabled = cloud.enabled;
+                            let url = state.url.clone();
+                            let user = state.user.clone();
+                            let pass = state.pass.clone();
+                            div()
+                                .v_flex()
+                                .gap_3()
+                                .child(
+                                    row_block("启用云同步", "WebDAV 同步本地数据", cx).child(
+                                        Switch::new("cloud-enabled")
+                                            .small()
+                                            .checked(cloud.enabled)
+                                            .on_click({
+                                                let entity = connect_entity.clone();
+                                                move |checked, _window, cx| {
+                                                    entity.update(cx, |p, cx| {
+                                                        p.local.cloud_sync.enabled = *checked;
+                                                        p.push_settings(cx);
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }),
+                                    ),
+                                )
+                                .when(sync_enabled, |el| {
+                                    let entity = connect_entity.clone();
+                                    el.child(
+                                        div()
+                                            .v_flex()
+                                            .gap_3()
+                                            .child(
+                                                field_block("WebDAV 地址", cx)
+                                                    .child(Input::new(&url).small()),
+                                            )
+                                            .child(field_block("用户名", cx).child(Input::new(&user).small()))
+                                            .child(field_block("密码", cx).child(Input::new(&pass).small()))
+                                            .child(
+                                                row_block(
+                                                    "信任自签名证书",
+                                                    "跳过证书校验（用于自签名 / 内网 NAS）",
+                                                    cx,
+                                                )
+                                                .child(
+                                                    Switch::new("trust-self-signed")
+                                                        .small()
+                                                        .checked(
+                                                            entity.read(cx)
+                                                                .local
+                                                                .cloud_sync
+                                                                .trust_self_signed,
+                                                        )
+                                                        .on_click({
+                                                            let entity = connect_entity.clone();
+                                                            move |checked, _window, cx| {
+                                                                entity.update(cx, |p, cx| {
+                                                                    p.local
+                                                                        .cloud_sync
+                                                                        .trust_self_signed = *checked;
+                                                                    crate::http::set_trust_self_signed(
+                                                                        *checked,
+                                                                    );
+                                                                    p.push_settings(cx);
+                                                                    cx.notify();
+                                                                });
+                                                            }
+                                                        }),
+                                                ),
+                                            )
+                                            .child(Self::sync_test_row(&entity, cx)),
+                                    )
+                                })
                         }),
-                )
-            })
+                        SettingItem::render(move |_, _window, cx| {
+                            let state = recent_entity.read(cx);
+                            let sync_enabled = state.local.cloud_sync.enabled;
+                            let keep_recent = state.keep_recent.clone();
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .gap_1()
+                                        .child(div().text_sm().child("云端保留近"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("0 = 不限制，保留的历史备份条数"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(120.))
+                                        .child(
+                                            Input::new(&keep_recent).small().disabled(!sync_enabled),
+                                        ),
+                                )
+                        }),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("同步行为")
+                    .items([
+                        SettingItem::render(move |_, _window, cx| {
+                            let state = behavior_entity.read(cx);
+                            let sync_enabled = state.local.cloud_sync.enabled;
+                            let cloud = state.local.cloud_sync.clone();
+                            div()
+                                .v_flex()
+                                .gap_3()
+                                .child(
+                                    row_block("启动时拉取", "应用启动时从 WebDAV 拉取最新数据", cx)
+                                        .child(
+                                            Switch::new("fetch-on-startup")
+                                                .small()
+                                                .disabled(!sync_enabled)
+                                                .checked(cloud.fetch_on_startup)
+                                                .on_click({
+                                                    let entity = behavior_entity.clone();
+                                                    move |checked, _window, cx| {
+                                                        entity.update(cx, |p, cx| {
+                                                            p.local.cloud_sync.fetch_on_startup = *checked;
+                                                            p.push_settings(cx);
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    row_block("关闭时上传", "关闭窗口时自动把本地数据上传到 WebDAV", cx)
+                                        .child(
+                                            Switch::new("upload-on-exit")
+                                                .small()
+                                                .disabled(!sync_enabled)
+                                                .checked(cloud.upload_on_exit)
+                                                .on_click({
+                                                    let entity = behavior_entity.clone();
+                                                    move |checked, _window, cx| {
+                                                        entity.update(cx, |p, cx| {
+                                                            p.local.cloud_sync.upload_on_exit = *checked;
+                                                            p.push_settings(cx);
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }),
+                                        ),
+                                )
+                        }),
+                    ]),
+            )
+            .group(
+                SettingGroup::new()
+                    .title("定时任务")
+                    .items([
+                        SettingItem::render(move |_, _window, cx| {
+                            let state = schedule_entity.read(cx);
+                            let reachable = state.local.cloud_sync.enabled;
+                            let backup = state.local.auto_backup.clone();
+                            let backup_interval = state.backup_interval.clone();
+                            Self::schedule_rows("定时备份", &backup, &backup_interval, reachable, &schedule_entity, cx)
+                        }),
+                        SettingItem::render(move |_, _window, cx| {
+                            let state = schedule_entity2.read(cx);
+                            let reachable = state.local.cloud_sync.enabled;
+                            let restore = state.local.auto_restore.clone();
+                            let restore_interval = state.restore_interval.clone();
+                            div()
+                                .v_flex()
+                                .gap_2()
+                                .child(Self::schedule_rows("定时恢复", &restore, &restore_interval, reachable, &schedule_entity2, cx))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().warning)
+                                        .child("提示：自动恢复会覆盖本地数据，请谨慎启用。"),
+                                )
+                        }),
+                    ]),
+            )
     }
 
     /// Run a WebDAV connection test with the panel's current credentials,
@@ -760,11 +694,65 @@ impl SettingsPanel {
             .detach();
     }
 
-    fn render_schedule(
-        &self,
+    /// A 「测试连接」button plus a live result line. Built from the live panel
+    /// state so it works inside a `SettingItem::render` closure (`&mut App`).
+    fn sync_test_row(entity: &Entity<Self>, cx: &mut App) -> impl IntoElement {
+        let state = entity.read(cx).sync_test.clone();
+        let entity = entity.clone();
+        let client = cx.http_client();
+
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                Button::new("sync-test")
+                    .small()
+                    .outline()
+                    .label(match state {
+                        TransferState::Busy => "测试中…".to_string(),
+                        _ => "测试连接".to_string(),
+                    })
+                    .disabled(matches!(state, TransferState::Busy))
+                    .on_click({
+                        let entity = entity.clone();
+                        let client = client.clone();
+                        move |_, window, cx| {
+                            Self::run_sync_test(entity.clone(), client.clone(), window, cx);
+                        }
+                    }),
+            )
+            .child(sync_state_text(&state, cx))
+            .when(is_cert_error(&state), |el| {
+                let entity = entity.clone();
+                let client = client.clone();
+                el.child(
+                    Button::new("trust-cert-and-retry")
+                        .small()
+                        .ghost()
+                        .label("信任此证书并重试")
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |p, cx| {
+                                p.local.cloud_sync.trust_self_signed = true;
+                                crate::http::set_trust_self_signed(true);
+                                p.push_settings(cx);
+                                cx.notify();
+                            });
+                            Self::run_sync_test(entity.clone(), client.clone(), window, cx);
+                        }),
+                )
+            })
+    }
+
+    /// One 「定时备份/恢复」row: enable switch + interval input + unit radio.
+    /// The ignore `_window` — the settings shell owns window sizing.
+    fn schedule_rows(
         title: &'static str,
         schedule: &ScheduleConfig,
-        cx: &mut Context<Self>,
+        interval: &Entity<InputState>,
+        reachable: bool,
+        entity: &Entity<Self>,
+        cx: &mut App,
     ) -> impl IntoElement {
         let enabled = schedule.enabled;
         let unit_ix = match schedule.unit.as_ref() {
@@ -772,13 +760,9 @@ impl SettingsPanel {
             "day" => Some(2),
             _ => Some(0),
         };
-        let reachable = self.local.cloud_sync.enabled;
         let is_backup = title == "定时备份";
-        let interval_field: Entity<InputState> =
-            if is_backup { self.backup_interval.clone() } else { self.restore_interval.clone() };
         let key = if is_backup { "backup" } else { "restore" };
-        let entity = cx.entity();
-        let entity2 = entity.clone();
+        let entity = entity.clone();
 
         div()
             .v_flex()
@@ -806,6 +790,8 @@ impl SettingsPanel {
                 ),
             )
             .when(enabled, |el| {
+                let interval = interval.clone();
+                let entity = entity.clone();
                 el.child(
                     div()
                         .flex()
@@ -820,281 +806,349 @@ impl SettingsPanel {
                         .child(
                             div()
                                 .w(px(100.))
-                                .child(Input::new(&interval_field).small().disabled(!reachable)),
+                                .child(Input::new(&interval).small().disabled(!reachable)),
                         )
-                        .child(
+                        .child({
+                            let unit_ix = unit_ix;
+                            let entity = entity.clone();
                             RadioGroup::horizontal(ElementId::Name(format!("unit-{key}").into()))
                                 .selected_index(unit_ix)
                                 .child("分钟")
                                 .child("小时")
                                 .child("天")
-                                .on_click({
-                                    let entity = entity2.clone();
-                                    move |ix, _window, cx| {
-                                        entity.update(cx, |p, cx| {
-                                            let unit = match *ix {
-                                                1 => "hour",
-                                                2 => "day",
-                                                _ => "minute",
-                                            };
-                                            if is_backup {
-                                                p.local.auto_backup.unit = unit.into();
-                                            } else {
-                                                p.local.auto_restore.unit = unit.into();
-                                            }
-                                            p.push_settings(cx);
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        ),
+                                .on_click(move |ix, _window, cx| {
+                                    let ix = *ix;
+                                    entity.update(cx, |p, cx| {
+                                        let unit = match ix {
+                                            1 => "hour",
+                                            2 => "day",
+                                            _ => "minute",
+                                        };
+                                        if is_backup {
+                                            p.local.auto_backup.unit = unit.into();
+                                        } else {
+                                            p.local.auto_restore.unit = unit.into();
+                                        }
+                                        p.push_settings(cx);
+                                        cx.notify();
+                                    });
+                                })
+                        }),
                 )
             })
     }
 
     // ── 数据 ──
 
-    fn render_data(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .v_flex()
-            .gap_6()
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        Button::new("export-db")
-                            .outline()
-                            .small()
-                            .label("导出")
-                            .on_click({
-                                move |_, window, cx| {
-                                    let Some(app) = cx
-                                        .try_global::<DoitAppHandle>()
-                                        .map(|h| h.0.clone())
-                                    else {
-                                        return;
-                                    };
-                                    // Snapshot the current data up-front; the
-                                    // save dialog resolves asynchronously.
-                                    let snap = {
-                                        let app = app.read(&*cx);
-                                        SyncSnapshot {
-                                            version: 1,
-                                            exported_at: app.last_modified.clone(),
-                                            todos: app.todos.clone(),
-                                            settings: app.settings.clone(),
-                                        }
-                                    };
-                                    let json = match serde_json::to_string_pretty(&snap) {
-                                        Ok(json) => json,
-                                        Err(_) => {
-                                            window.push_notification(
-                                                Notification::error("序列化数据失败"),
-                                                &mut *cx,
-                                            );
-                                            return;
-                                        }
-                                    };
-                                    let dir = std::env::temp_dir();
-                                    let receiver =
-                                        cx.prompt_for_new_path(&dir, Some("doit-backup.json"));
-                                    window.spawn(&*cx, async move |async_cx| {
-                                        let path = match receiver.await {
-                                            Ok(Ok(Some(path))) => path,
-                                            _ => return, // 用户取消
-                                        };
-                                        let result = std::fs::write(&path, &json);
-                                        let _ = async_cx.update(|window, app_cx| {
-                                            let ok = result.is_ok();
-                                            window.push_notification(
-                                                if ok {
-                                                    Notification::success(format!(
-                                                        "已导出到 {}",
-                                                        path.display()
-                                                    ))
-                                                } else {
-                                                    Notification::error("导出失败")
-                                                },
-                                                app_cx,
-                                            );
-                                        });
-                                    })
-                                    .detach();
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("import-db")
-                            .outline()
-                            .small()
-                            .label("导入")
-                            .on_click({
-                                let entity = cx.entity();
-                                move |_, window, cx| {
-                                    let receiver = cx.prompt_for_paths(PathPromptOptions {
-                                        files: true,
-                                        directories: false,
-                                        multiple: false,
-                                        prompt: Some("选择要导入的 JSON 备份文件".into()),
-                                    });
-                                    let entity = entity.clone();
-                                    window.spawn(&*cx, async move |async_cx| {
-                                        let path = match receiver.await {
-                                            Ok(Ok(Some(paths))) => match paths.into_iter().next() {
-                                                Some(path) => path,
-                                                None => return,
-                                            },
-                                            _ => return, // 用户取消
-                                        };
-                                        let parsed = std::fs::read_to_string(&path)
-                                            .ok()
-                                            .and_then(|s| {
-                                                serde_json::from_str::<SyncSnapshot>(&s).ok()
-                                            });
-                                        let _ = async_cx.update(|window, app_cx| {
-                                            let Some(snap) = parsed else {
-                                                window.push_notification(
-                                                    Notification::error("导入失败：不是有效的备份文件"),
-                                                    app_cx,
-                                                );
-                                                return;
-                                            };
-                                            // Apply to the app first (todos +
-                                            // settings + theme), then refresh
-                                            // this panel's working copy.
-                                            if let Some(handle) = app_cx
-                                                .try_global::<DoitAppHandle>()
-                                            {
-                                                let app = handle.0.clone();
-                                                let settings = snap.settings.clone();
-                                                app.update(app_cx, |app, cx| {
-                                                    app.apply_snapshot(snap, window, cx);
-                                                });
-                                                entity.update(app_cx, |p, cx| {
-                                                    p.reload_after_import(settings, window, cx);
-                                                });
-                                            }
-                                            window.push_notification(
-                                                Notification::success("已导入数据"),
-                                                app_cx,
-                                            );
-                                        });
-                                    })
-                                    .detach();
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("clear-data")
-                            .danger()
-                            .small()
-                            .outline()
-                            .label("清空")
-                            .on_click({
-                                let entity = cx.entity();
-                                move |_, window, cx| {
-                                    let entity = entity.clone();
-                                    window.open_alert_dialog(cx, move |alert, _window, _cx| {
-                                        let entity = entity.clone();
-                                        alert
-                                            .title("清空所有数据？")
-                                            .description("将删除所有待办、分类和标签，此操作不可恢复。")
-                                            .button_props(
-                                                DialogButtonProps::default()
-                                                    .ok_text("清空")
-                                                    .ok_variant(ButtonVariant::Danger)
-                                                    .on_ok(move |_, _window, cx| {
-                                                        if let Some(handle) =
-                                                            cx.try_global::<DoitAppHandle>()
-                                                        {
-                                                            let app = handle.0.clone();
-                                                            app.update(cx, |app, cx| {
-                                                                app.clear_all(cx);
-                                                            });
+    fn page_data(entity: &Entity<Self>) -> SettingPage {
+        let data_entity = entity.clone();
+        SettingPage::new("数据")
+            .description("导出、导入或清空本地数据")
+            .group(
+                SettingGroup::new()
+                    .title("备份")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let entity = data_entity.clone();
+                        div()
+                            .v_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("export-db")
+                                            .outline()
+                                            .small()
+                                            .label("导出")
+                                            .on_click({
+                                                move |_, window, cx| {
+                                                    let Some(app) = cx
+                                                        .try_global::<DoitAppHandle>()
+                                                        .map(|h| h.0.clone())
+                                                    else {
+                                                        return;
+                                                    };
+                                                    // Snapshot the current data up-front; the
+                                                    // save dialog resolves asynchronously.
+                                                    let snap = {
+                                                        let app = app.read(&*cx);
+                                                        SyncSnapshot {
+                                                            version: 1,
+                                                            exported_at: app.last_modified.clone(),
+                                                            todos: app.todos.clone(),
+                                                            settings: app.settings.clone(),
                                                         }
-                                                        entity.update(cx, |p, cx| {
-                                                            p.local = AppSettings::default();
-                                                            p.active = Section::Appearance;
-                                                            p.recording = false;
-                                                            cx.notify();
+                                                    };
+                                                    let json = match serde_json::to_string_pretty(
+                                                        &snap,
+                                                    ) {
+                                                        Ok(json) => json,
+                                                        Err(_) => {
+                                                            window.push_notification(
+                                                                Notification::error("序列化数据失败"),
+                                                                &mut *cx,
+                                                            );
+                                                            return;
+                                                        }
+                                                    };
+                                                    let dir = std::env::temp_dir();
+                                                    let receiver = cx.prompt_for_new_path(
+                                                        &dir,
+                                                        Some("doit-backup.json"),
+                                                    );
+                                                    window.spawn(&*cx, async move |async_cx| {
+                                                        let path = match receiver.await {
+                                                            Ok(Ok(Some(path))) => path,
+                                                            _ => return, // 用户取消
+                                                        };
+                                                        let result =
+                                                            std::fs::write(&path, &json);
+                                                        let _ = async_cx.update(|window, app_cx| {
+                                                            let ok = result.is_ok();
+                                                            window.push_notification(
+                                                                if ok {
+                                                                    Notification::success(
+                                                                        format!(
+                                                                            "已导出到 {}",
+                                                                            path.display()
+                                                                        ),
+                                                                    )
+                                                                } else {
+                                                                    Notification::error("导出失败")
+                                                                },
+                                                                app_cx,
+                                                            );
                                                         });
-                                                        true
-                                                    }),
-                                            )
-                                    });
-                                }
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("清空将删除所有待办、分类和标签；主题与快捷键等设置会保留。"),
+                                                    })
+                                                    .detach();
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("import-db")
+                                            .outline()
+                                            .small()
+                                            .label("导入")
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                move |_, window, cx| {
+                                                    let receiver = cx.prompt_for_paths(
+                                                        PathPromptOptions {
+                                                            files: true,
+                                                            directories: false,
+                                                            multiple: false,
+                                                            prompt: Some(
+                                                                "选择要导入的 JSON 备份文件".into(),
+                                                            ),
+                                                        },
+                                                    );
+                                                    let entity = entity.clone();
+                                                    window.spawn(&*cx, async move |async_cx| {
+                                                        let path = match receiver.await {
+                                                            Ok(Ok(Some(paths))) => {
+                                                                match paths.into_iter().next() {
+                                                                    Some(path) => path,
+                                                                    None => return,
+                                                                }
+                                                            }
+                                                            _ => return, // 用户取消
+                                                        };
+                                                        let parsed = std::fs::read_to_string(&path)
+                                                            .ok()
+                                                            .and_then(|s| {
+                                                                serde_json::from_str::<SyncSnapshot>(
+                                                                    &s,
+                                                                )
+                                                                .ok()
+                                                            });
+                                                        let _ = async_cx.update(
+                                                            |window, app_cx| {
+                                                                let Some(snap) = parsed else {
+                                                                    window.push_notification(
+                                                                        Notification::error(
+                                                                            "导入失败：不是有效的备份文件",
+                                                                        ),
+                                                                        app_cx,
+                                                                    );
+                                                                    return;
+                                                                };
+                                                                // Apply to the app first (todos +
+                                                                // settings + theme), then refresh
+                                                                // this panel's working copy.
+                                                                if let Some(handle) = app_cx
+                                                                    .try_global::<DoitAppHandle>()
+                                                                {
+                                                                    let app = handle.0.clone();
+                                                                    let settings =
+                                                                        snap.settings.clone();
+                                                                    app.update(
+                                                                        app_cx,
+                                                                        |app, cx| {
+                                                                            app.apply_snapshot(
+                                                                                snap, window, cx,
+                                                                            );
+                                                                        },
+                                                                    );
+                                                                    entity.update(
+                                                                        app_cx,
+                                                                        |p, cx| {
+                                                                            p.reload_after_import(
+                                                                                settings,
+                                                                                window,
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    );
+                                                                }
+                                                                window.push_notification(
+                                                                    Notification::success(
+                                                                        "已导入数据",
+                                                                    ),
+                                                                    app_cx,
+                                                                );
+                                                            },
+                                                        );
+                                                    })
+                                                    .detach();
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("clear-data")
+                                            .danger()
+                                            .small()
+                                            .outline()
+                                            .label("清空")
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                move |_, window, cx| {
+                                                    let entity = entity.clone();
+                                                    window.open_alert_dialog(
+                                                        cx,
+                                                        move |alert, _window, _cx| {
+                                                            let entity = entity.clone();
+                                                            alert
+                                                                .title("清空所有数据？")
+                                                                .description("将删除所有待办、分类和标签，此操作不可恢复。")
+                                                                .button_props(
+                                                                    DialogButtonProps::default()
+                                                                        .ok_text("清空")
+                                                                        .ok_variant(ButtonVariant::Danger)
+                                                                        .on_ok(
+                                                                            move |_, _window, cx| {
+                                                                                if let Some(handle) =
+                                                                                    cx.try_global::<DoitAppHandle>()
+                                                                                {
+                                                                                    let app = handle.0.clone();
+                                                                                    app.update(cx, |app, cx| {
+                                                                                        app.clear_all(cx);
+                                                                                    });
+                                                                                }
+                                                                                entity.update(cx, |p, cx| {
+                                                                                    p.local =
+                                                                                        AppSettings::default();
+                                                                                    p.recording = false;
+                                                                                    cx.notify();
+                                                                                });
+                                                                                true
+                                                                            },
+                                                                        ),
+                                                                )
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("清空将删除所有待办、分类和标签；主题与快捷键等设置会保留。"),
+                            )
+                    })),
             )
     }
 
     // ── 关于 ──
 
-    fn render_about(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .v_flex()
-            .gap_4()
-            .child(div().text_lg().font_bold().child("Doit"))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
+    fn page_about(entity: &Entity<Self>) -> SettingPage {
+        let about_entity = entity.clone();
+        SettingPage::new("关于")
+            .description("版本信息与更新检查")
+            .group(
+                SettingGroup::new()
+                    .title("Doit")
+                    .item(SettingItem::render(move |_, _window, cx| {
+                        let update_state = about_entity.read(cx).update_state.clone();
+                        let entity = about_entity.clone();
                         div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("当前版本"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        Button::new("check-update")
-                            .small()
-                            .outline()
-                            .label(match self.update_state {
-                                TransferState::Busy => "检查中…".to_string(),
-                                _ => "检查更新".to_string(),
-                            })
-                            .disabled(matches!(self.update_state, TransferState::Busy))
-                            .on_click({
-                                let entity = cx.entity();
-                                move |_, window, cx| {
-                                    // A fresh proxy-aware client: the update check must
-                                    // honour the system proxy to reach api.github.com,
-                                    // unlike the `no_proxy` WebDAV sync client.
-                                    run_update_check(
-                                        entity.clone(),
-                                        crate::http::new_public_http_client(),
-                                        window,
-                                        cx,
+                            .v_flex()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("当前版本"),
                                     )
-                                }
-                            }),
-                    )
-                    .child(update_state_text(&self.update_state, cx)),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("用 GPUI Kit 纯 Rust 重写的 Doit 桌面待办应用。"),
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .child(format!(
+                                                "v{}",
+                                                env!("CARGO_PKG_VERSION")
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        Button::new("check-update")
+                                            .small()
+                                            .outline()
+                                            .label(match update_state {
+                                                TransferState::Busy => {
+                                                    "检查中…".to_string()
+                                                }
+                                                _ => "检查更新".to_string(),
+                                            })
+                                            .disabled(matches!(
+                                                update_state,
+                                                TransferState::Busy
+                                            ))
+                                            .on_click({
+                                                let entity = entity.clone();
+                                                move |_, window, cx| {
+                                                    // A fresh proxy-aware client: the update check must
+                                                    // honour the system proxy to reach api.github.com,
+                                                    // unlike the `no_proxy` WebDAV sync client.
+                                                    run_update_check(
+                                                        entity.clone(),
+                                                        crate::http::new_public_http_client(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                    )
+                                    .child(update_state_text(&update_state, cx)),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("用 GPUI Kit 纯 Rust 重写的 Doit 桌面待办应用。"),
+                            )
+                    })),
             )
     }
 }
@@ -1277,19 +1331,6 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 // ── Small composition helpers ───────────────────────────────────────────────
-
-fn section_block(title: &'static str, cx: &App) -> gpui_kit::Div {
-    div()
-        .v_flex()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .font_semibold()
-                .text_color(cx.theme().muted_foreground)
-                .child(title),
-        )
-}
 
 fn row_block(title: &str, hint: &str, cx: &App) -> gpui_kit::Div {
     let title = title.to_string();

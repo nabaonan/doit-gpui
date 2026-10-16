@@ -9,6 +9,10 @@ use gpui_kit::base::StyledExt;
 use gpui_kit::component::button::ButtonVariants;
 use gpui_kit::component::calendar::{CalendarEvent, CalendarState, Date};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::dialog::{
+    DialogAction, DialogButtonProps, DialogClose,
+};
+use gpui_kit::component::time_field::{TimeField, TimeFieldState};
 use gpui_kit::component::select::{
     SearchableVec, Select, SelectEvent, SelectItem, SelectState,
 };
@@ -24,12 +28,13 @@ use gpui_kit::component::{
     button::Button,
     input::{Input, InputState, InputEvent, AnyInputState},
     menu::{ContextMenuExt, PopupMenuItem},
+    tag::Tag as ComponentTag,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
     self, div, AnyElement, AnyView, App, Hsla, Context, Entity, Global, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window,
-    WindowAppearance, px, relative, ElementId,
+    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, SystemNotification,
+    Window, WindowAppearance, px, relative, ElementId,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -130,6 +135,12 @@ pub struct DoitApp {
     /// progress fraction (0..=1). Only used in "longpress" completion mode.
     long_press: Option<(String, f32)>,
 
+    /// Shared `TimeField` state backing the reminder time-picker dialog.
+    reminder_time: Entity<TimeFieldState>,
+
+    /// The per-second reminder ticker state: whether the loop is live.
+    reminder_ticker_on: bool,
+
     /// Top-bar category filter dropdown.
     cat_select: Entity<CatSelectState>,
     _cat_select_sub: Subscription,
@@ -149,6 +160,23 @@ impl DoitApp {
         // fresh install) so sync keeps judging by the latest version.
         let (seed_todos, settings, data_stamp) =
             load_local_data().unwrap_or_else(|| (sample_todos(), AppSettings::default(), now_iso()));
+
+        // 兜底：启动时清掉已到点的提醒（到点即发系统通知并清除；此逻辑处理
+        // 上次运行到点前退出、遗留过期 remind_at 的情况）。
+        let mut pruned = false;
+        let seed_todos: Vec<TodoItem> = seed_todos
+            .into_iter()
+            .map(|mut t| {
+                if !t.completed
+                    && t.remind_at.is_some()
+                    && reminder_remaining_secs(&t.remind_at).is_none()
+                {
+                    t.remind_at = None;
+                    pruned = true;
+                }
+                t
+            })
+            .collect();
 
         // Honor the self-signed certificate preference for WebDAV requests.
         crate::http::set_trust_self_signed(settings.cloud_sync.trust_self_signed);
@@ -212,7 +240,9 @@ impl DoitApp {
             }
         });
 
-        Self {
+        let reminder_time = cx.new(|cx| TimeFieldState::new(window, cx));
+
+        let this = Self {
             next_id: next_todo_id(&seed_todos),
             todos: seed_todos,
             settings,
@@ -234,9 +264,18 @@ impl DoitApp {
             edit_input,
             _edit_sub: edit_sub,
             long_press: None,
+            reminder_time,
+            reminder_ticker_on: false,
             cat_select,
             _cat_select_sub: cat_select_sub,
+        };
+
+        // Persist the start-of-run pruning of arrived reminders.
+        if pruned {
+            this.save_local();
         }
+
+        this
     }
 
     // ── Mutations ──
@@ -459,12 +498,234 @@ impl DoitApp {
         cat_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if cascade_cat(&mut self.todos, id, cat_id) {
+            self.last_modified = now_iso();
+            self.save_local();
+            cx.notify();
+        }
+    }
+
+    /// Open the reminder time-picker dialog for a todo.
+    fn open_reminder_dialog(
+        &mut self,
+        id: &str,
+        has_reminder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Seed the time field with the existing reminder, or now if fresh.
+        let initial = self
+            .todos
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.remind_at.as_deref())
+            .and_then(parse_remind_at)
+            .map(|d| d.time())
+            .unwrap_or_else(|| Local::now().time());
+        self.reminder_time.update(cx, |s, cx| {
+            s.set_time(initial, window, cx);
+        });
+        cx.notify();
+
+        let has = has_reminder;
+        let target = id.to_string();
+        let reminder_time = self.reminder_time.clone();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let mut d = dialog
+                .title("设置提醒")
+                .w(px(340.))
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_4()
+                        .p_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("选择今天的时间点，到点后自动提醒你。"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(TimeField::new(&reminder_time)),
+                        ),
+                );
+            d = d.button_props(
+                DialogButtonProps::default()
+                    .ok_text("确定")
+                    .show_cancel(true)
+                    .cancel_text("取消")
+                    .on_ok({
+                        let target = target.clone();
+                        move |_click, window, cx| {
+                            if let Some(h) = cx.try_global::<DoitAppHandle>() {
+                                let app = h.0.clone();
+                                app.update(cx, |app, cx| {
+                                    app.set_reminder(&target, window, cx);
+                                });
+                            }
+                            true
+                        }
+                    }),
+            );
+            // Dialog 不自动渲染 OK/Cancel，必须由 footer 显式绘制按钮。
+            d = d.footer(
+                div()
+                    .flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(if has {
+                        let clear_target = target.clone();
+                        Button::new("clear-reminder")
+                            .ghost()
+                            .danger()
+                            .label("清除提醒")
+                            .on_click(move |_, window, cx| {
+                                if let Some(h) = cx.try_global::<DoitAppHandle>() {
+                                    let app = h.0.clone();
+                                    app.update(cx, |app, cx| {
+                                        app.clear_reminder(&clear_target, cx);
+                                    });
+                                }
+                                window.close_dialog(cx);
+                            })
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                DialogClose::new().trigger(|button| {
+                                    button.label("取消")
+                                }),
+                            )
+                            .child(
+                                DialogAction::new().child(
+                                    Button::new("confirm-reminder").primary().label("确定"),
+                                ),
+                            ),
+                    ),
+            );
+            d
+        });
+    }
+
+    /// Persist the reminder time (`HH:MM` on the current day) to a todo.
+    fn set_reminder(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let time = self.reminder_time.read(cx).time();
+        let when = Local::now()
+            .date_naive()
+            .and_time(time)
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
         if let Some(item) = self.todos.iter_mut().find(|t| t.id == id) {
-            item.cat_id = cat_id;
+            item.remind_at = Some(when);
+        }
+        self.last_modified = now_iso();
+        self.save_local();
+        self.ensure_reminder_ticker(window, cx);
+        cx.notify();
+    }
+
+    /// Remove a todo's reminder.
+    fn clear_reminder(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(item) = self.todos.iter_mut().find(|t| t.id == id) {
+            item.remind_at = None;
         }
         self.last_modified = now_iso();
         self.save_local();
         cx.notify();
+    }
+
+    /// Lazily start / keep alive the per-second reminder ticker. Called from
+    /// `render`; it does nothing when there are no unexpired reminders, and
+    /// never spawns a second loop while one is running.
+    ///
+    /// Ticking does two things each second: re-render the live countdowns, and
+    /// when a reminder arrives post an OS-level notification and clear the
+    /// todo's reminder (the row shows no leftover text).
+    fn ensure_reminder_ticker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let any_live = self
+            .todos
+            .iter()
+            .any(|t| reminder_remaining_secs(&t.remind_at).is_some());
+        if !any_live || self.reminder_ticker_on {
+            return;
+        }
+        self.reminder_ticker_on = true;
+        window.spawn(cx, async move |async_cx| loop {
+            async_cx
+                .background_executor()
+                .timer(Duration::from_secs(1))
+                .await;
+            let alive = async_cx
+                .update(|_window, app_cx| {
+                    let mut due = Vec::new();
+                    if let Some(handle) = app_cx.try_global::<DoitAppHandle>() {
+                        let app = handle.0.clone();
+                        app.update(app_cx, |app, cx| {
+                            // Collect todos whose reminder has arrived; their
+                            // countdown expires into an OS notification + the
+                            // row's reminder is cleared (no text remains).
+                            for t in app.todos.iter() {
+                                if t.completed || t.remind_at.is_none() {
+                                    continue;
+                                }
+                                if reminder_remaining_secs(&t.remind_at).is_none() {
+                                    due.push((t.id.clone(), t.content.clone()));
+                                }
+                            }
+                            if !due.is_empty() {
+                                for (id, _) in &due {
+                                    if let Some(item) =
+                                        app.todos.iter_mut().find(|t| &t.id == id)
+                                    {
+                                        item.remind_at = None;
+                                    }
+                                }
+                                app.last_modified = now_iso();
+                                app.save_local();
+                            }
+                            // Keep ticking while some reminder is still counting down.
+                            let any_live = app
+                                .todos
+                                .iter()
+                                .any(|t| reminder_remaining_secs(&t.remind_at).is_some());
+                            app.reminder_ticker_on = any_live;
+                            if !due.is_empty() || any_live {
+                                cx.notify();
+                            }
+                        });
+                    }
+                    // Post an OS-level notification for each reminder that fired.
+                    for (_, content) in &due {
+                        app_cx.show_system_notification(SystemNotification {
+                            tag: "doit-reminder".into(),
+                            title: "提醒时间到".into(),
+                            body: format!("「{content}」").into(),
+                            actions: Vec::new(),
+                        });
+                    }
+                    !due.is_empty()
+                        || app_cx
+                            .try_global::<DoitAppHandle>()
+                            .map(|h| h.0.read(app_cx).reminder_ticker_on)
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+        })
+        .detach();
     }
 
     /// Enter inline-edit mode for a todo.
@@ -489,10 +750,14 @@ impl DoitApp {
     fn commit_edit(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.editing_id.take() {
             let value = self.edit_input.read(cx).value().trim().to_string();
-            if !value.is_empty() {
-                if let Some(todo) = self.todos.iter_mut().find(|t| t.id == id) {
-                    todo.content = value.into();
+            if value.is_empty() {
+                // 内容为空：不添加。若是刚插入的空骨架（子任务），直接移除，
+                // 避免列表残留空白行；编辑已有待办时清空则保持原内容。
+                if self.todos.iter().find(|t| t.id == id && t.content.is_empty()).is_some() {
+                    self.todos.retain(|t| t.id != id);
                 }
+            } else if let Some(todo) = self.todos.iter_mut().find(|t| t.id == id) {
+                todo.content = value.into();
             }
         }
         self.last_modified = now_iso();
@@ -502,7 +767,12 @@ impl DoitApp {
 
     /// Leave inline-edit mode without applying.
     fn cancel_edit(&mut self, cx: &mut Context<Self>) {
-        self.editing_id = None;
+        if let Some(id) = self.editing_id.take() {
+            // 取消一个仍为空的新建骨架时同样移除，不留空白行。
+            if self.todos.iter().find(|t| t.id == id && t.content.is_empty()).is_some() {
+                self.todos.retain(|t| t.id != id);
+            }
+        }
         cx.notify();
     }
 
@@ -562,6 +832,37 @@ impl DoitApp {
 
 // ── Render ──────────────────────────────────────────────────────────────────
 
+/// 行尾徽章：统一圆润胶囊风格；标签（`squared=false`）实心填充，
+/// 分类（`squared=true`）半透明底 + 虚线边框，靠虚线而非形状区分。
+/// 用 gpui-kit 自带 `Tag` 组件承载自定义颜色，避免 ad-hoc div 样式。
+fn render_chip(name: SharedString, color: &str, squared: bool) -> AnyElement {
+    let bg = Colorize::parse_hex(color).unwrap_or_else(|_| Hsla::blue());
+    let rgb = bg.to_rgb();
+    let luminance = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+    let fg = if luminance > 0.55 {
+        gpui::hsla(0., 0., 0., 0.9)
+    } else {
+        gpui::hsla(0., 0., 1., 0.95)
+    };
+    let border = bg;
+    if squared {
+        // 分类：同样的圆润胶囊，半透明底色 + 虚线边框区分于实心标签。
+        ComponentTag::custom(bg.opacity(0.35), fg, bg)
+            .small()
+            .rounded_full()
+            .border_dashed()
+            .child(name)
+            .into_any_element()
+    } else {
+        // 标签：实心胶囊。
+        ComponentTag::custom(bg, fg, border)
+            .small()
+            .rounded_full()
+            .child(name)
+            .into_any_element()
+    }
+}
+
 /// 热力图 hover 提示 view：内容直接使用 gpui 自带 Tooltip 组件渲染
 /// （`Tooltip::new(...).build(...)`，保证样式与内置 tooltip 完全一致）。
 /// 原生 `.tooltip()` 每次进入 hover 都会重建这个 view，因此外层 div 首帧
@@ -598,6 +899,9 @@ impl Render for HeatmapTooltip {
 impl Render for DoitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_bg = cx.theme().background;
+
+        // Keep the per-second countdown ticker alive while any reminder is live.
+        self.ensure_reminder_ticker(window, cx);
 
         div()
             .v_flex()
@@ -755,7 +1059,16 @@ impl DoitApp {
 // ── Today View ──────────────────────────────────────────────────────────────
 
 /// Extra left padding per nesting level a subtask is rendered below its parent.
-const SUBTASK_INDENT: f32 = 16.;
+///
+/// Indent is computed so a subtask's chevron lands exactly under its parent's
+/// text start. A parent row's text starts after: 12px row padding + 14px chevron
+/// + 4px gap + [12px checkbox slot + 4px gap] (checkbox mode) and then the text.
+/// Long-press mode has no checkbox slot, so its text (and thus indent) sits 16px
+/// further left. depth-1 chevron at 12+indent == parent text start:
+///   checkbox mode: 12 + 14 + 4 + 12 + 4 = 46 → indent 34
+///   long-press   : 12 + 14 + 4          = 30 → indent 18
+const SUBTASK_INDENT: f32 = 34.;
+const SUBTASK_INDENT_LONGPRESS: f32 = 18.;
 
 impl DoitApp {
     fn render_today(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -899,6 +1212,18 @@ impl DoitApp {
             .as_ref()
             .and_then(|tid| tags.iter().find(|t| t.id == *tid))
             .map(|t| (t.name.clone(), t.color.clone().into()));
+        // 分类只在"全部"筛选下、且仅在最顶层任务上展示：让用户在混合列表里看清每
+        // 项归属，而又不重复刷屏。已按分类筛选时分类恒定可见、子任务继承父分类，
+        // 两者都不必再贴胶囊。
+        let cat_for_display: Option<(SharedString, SharedString)> =
+            if self.cat_filter == CatFilter::None && todo.parent_id.is_none() {
+                todo.cat_id
+                    .as_ref()
+                    .and_then(|cid| self.settings.categories.iter().find(|c| c.id == *cid))
+                    .map(|c| (c.name.clone(), c.color.clone().into()))
+            } else {
+                None
+            };
         let is_editing = self.editing_id.as_deref() == Some(&*id);
         // "长按完成" 模式下：整行是可长按区域，行背景用绿色进度条从左到右填充，
         // 走到头即 toggle 完成。is_editing / has_children 的行不参与长按。
@@ -916,7 +1241,7 @@ impl DoitApp {
             .id(ElementId::Name(id.clone().into()))
             .flex()
             .items_center()
-            .gap_2()
+            .gap_1()
             .px(px(12.))
             .py(px(8.))
             .rounded_lg()
@@ -957,8 +1282,17 @@ impl DoitApp {
                 )
             })
             // Nest subtasks under their parent: additive on top of the base
-            // 12px padding, one extra indent step per depth (16px/level).
-            .when(depth > 0, |el| el.pl(px(12. + SUBTASK_INDENT * depth as f32)))
+            // 12px padding, one extra indent step per depth. Long-press mode
+            // has no checkbox slot, so it uses a tighter indent so a subtask's
+            // chevron still lands under its parent's text start.
+            .when(depth > 0, |el| {
+                let step = if longpress {
+                    SUBTASK_INDENT_LONGPRESS
+                } else {
+                    SUBTASK_INDENT
+                };
+                el.pl(px(12. + step * depth as f32))
+            })
             .hover(|s| s.bg(cx.theme().muted))
             // 长按完成模式：整行都是可长按完成区域（父任务/编辑中除外）。
             .when(longpress && !has_children && !is_editing, |el| {
@@ -1068,6 +1402,9 @@ impl DoitApp {
                 let current_tag = tag_id.clone();
                 let current_cat = todo.cat_id.clone();
                 let content_for_edit = content.clone();
+                let todo_has_reminder = todo.remind_at.is_some();
+                // 分类只归属顶层任务，子任务（有 parent）不提供"移动到分类"菜单。
+                let is_subtask = todo.parent_id.is_some();
                 move |menu, window, cx| {
                     let id_for_menu = id_for_menu.clone();
                     menu.item(
@@ -1104,6 +1441,31 @@ impl DoitApp {
                                     }
                                 }
                             }),
+                    )
+                    .item(
+                        PopupMenuItem::new(if todo_has_reminder {
+                            "修改提醒"
+                        } else {
+                            "设置提醒"
+                        })
+                        .icon(gpui_kit::assets::IconName::Clock)
+                        .on_click({
+                            let id_for_menu = id_for_menu.clone();
+                            let has = todo_has_reminder;
+                            move |_, window, cx| {
+                                if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                    let app = handle.0.clone();
+                                    app.update(cx, |app, cx| {
+                                        app.open_reminder_dialog(
+                                            &id_for_menu,
+                                            has,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }
+                        }),
                     )
                     .submenu("设置标签", window, cx, {
                         let menu_tags = menu_tags.clone();
@@ -1162,7 +1524,8 @@ impl DoitApp {
                             m
                         }
                     })
-                    .submenu("移动到分类", window, cx, {
+                    .when(!is_subtask, |m| {
+                        m.submenu("移动到分类", window, cx, {
                         let menu_cats = menu_cats.clone();
                         let id_for_menu = id_for_menu.clone();
                         let current_cat = current_cat.clone();
@@ -1222,6 +1585,7 @@ impl DoitApp {
                             m
                         }
                     })
+                    })
                     .separator()
                     .item(
                         PopupMenuItem::element(move |_window, cx| {
@@ -1253,7 +1617,7 @@ impl DoitApp {
                         } else {
                             "icons/chevron-down.svg"
                         }))
-                        .size_5()
+                        .size(px(14.))
                         .tooltip(if collapsed { "展开子任务" } else { "收起子任务" })
                         .on_click({
                             let cid = id.clone();
@@ -1266,13 +1630,14 @@ impl DoitApp {
                         })
                         .into_any_element()
                 } else {
-                    div().size_5().flex_none().into_any_element()
+                    div().size(px(16.)).flex_none().into_any_element()
                 },
             )
             .child(
                 if longpress {
-                    // 长按完成模式：不显示左侧勾选框，改用整行长按 + 绿色进度条。
-                    div().size_3().flex_none().into_any_element()
+                    // 长按完成模式：没有勾选框，也就不需要保留占位槽，箭头右侧
+                    // 直接接文字（半个字间距），避免行中间留一段透明空洞。
+                    div().flex_none().into_any_element()
                 } else {
                     Checkbox::new(ElementId::Name(format!("chk-{}", &id).into()))
                         .checked(completed)
@@ -1332,32 +1697,33 @@ impl DoitApp {
                 },
             )
             .when(!is_editing, |el| {
+                // 行尾徽章：标签是胶囊形，分类是偏方形描边徽章，两者形状区分。
                 el.when_some(tag_for_display, |el, (name, color)| {
-                    // Paint a self-drawn capsule: the <Tag> component's variants
-                    // pick theme-dependent shades that read as backgroundless in
-                    // dark mode, so fill the chip ourselves with the item's own
-                    // colour so the background always shows.
-                    let bg = Colorize::parse_hex(&color).unwrap_or_else(|_| Hsla::blue());
-                    let rgb = bg.to_rgb();
-                    let luminance = 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
-                    let fg = if luminance > 0.55 {
-                        gpui::hsla(0., 0., 0., 0.9)
-                    } else {
-                        gpui::hsla(0., 0., 1., 0.95)
-                    };
-                    el.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .text_xs()
-                            .px(px(8.))
-                            .py(px(2.))
-                            .rounded_full()
-                            .bg(bg)
-                            .text_color(fg)
-                            .child(name),
-                    )
+                    el.child(render_chip(name, &color, false))
                 })
+                .when_some(cat_for_display, |el, (name, color)| {
+                    el.child(render_chip(name, &color, true))
+                })
+                // 倒计时：仅在提醒尚未到点(还有剩余时间)时显示；到点即由 ticker
+                // 清除提醒，行尾不残留任何文字。
+                .when_some(
+                    todo.remind_at.as_ref().and_then(|at| {
+                        reminder_remaining_secs(&Some(at.clone()))
+                    }),
+                    |el, secs| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(Icon::new(gpui_kit::assets::IconName::Clock).size_3())
+                                .child(format_countdown(secs)),
+                        )
+                    },
+                )
             })
     }
 }
@@ -2369,6 +2735,38 @@ fn child_ids_of<'a>(items: &'a [TodoItem], parent_id: &str) -> Vec<&'a TodoItem>
         .collect()
 }
 
+/// Set a category from `root_id`'s perspective. 分类只归属顶层任务：root 是子任务
+/// （有 parent_id）时拒绝并返回 false；否则把 root 的整棵子树统一切到 `cat_id`，
+/// 从数据层保证父级与子任务永不落入不同分类。返回操作是否生效。
+fn cascade_cat(
+    todos: &mut [TodoItem],
+    root_id: &str,
+    cat_id: Option<String>,
+) -> bool {
+    let Some(root) = todos.iter().find(|t| t.id == root_id) else {
+        return false;
+    };
+    if root.parent_id.is_some() {
+        return false;
+    }
+    let mut frontier = vec![root_id.to_string()];
+    let mut subtree = HashSet::new();
+    subtree.insert(root_id.to_string());
+    while let Some(pid) = frontier.pop() {
+        for t in todos.iter() {
+            if t.parent_id.as_deref() == Some(pid.as_str()) && subtree.insert(t.id.clone()) {
+                frontier.push(t.id.clone());
+            }
+        }
+    }
+    for t in todos.iter_mut() {
+        if subtree.contains(&t.id) {
+            t.cat_id = cat_id.clone();
+        }
+    }
+    true
+}
+
 // ── Time / demo helpers ─────────────────────────────────────────────────────
 
 fn now_iso() -> String {
@@ -2431,6 +2829,34 @@ fn format_time(iso: &Option<String>) -> SharedString {
     match iso {
         Some(s) if s.len() >= 19 => s[11..16].into(),
         _ => "".into(),
+    }
+}
+
+/// Parse a stored reminder timestamp into a `NaiveDateTime`.
+fn parse_remind_at(iso: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(iso, "%Y-%m-%dT%H:%M:%S").ok()
+}
+
+/// Seconds remaining until `remind_at`, or `None` if absent / zeroed-out.
+/// The stored stamp carries today's date, so an unexpired value is at most
+/// 24h away and always counts down on the current day.
+fn reminder_remaining_secs(remind_at: &Option<String>) -> Option<i64> {
+    let at = parse_remind_at(remind_at.as_ref()?)?;
+    let remaining = at.signed_duration_since(Local::now().naive_local()).num_seconds();
+    (remaining > 0).then_some(remaining)
+}
+
+/// The live countdown label for a todo row:
+/// * ≥ 1 hour  → "X时Y分"
+/// * 1–59 min  → "Y分钟"
+/// * < 1 min   → "Z秒"
+fn format_countdown(secs: i64) -> SharedString {
+    if secs >= 3600 {
+        format!("{}时{}分", secs / 3600, (secs % 3600) / 60).into()
+    } else if secs >= 60 {
+        format!("{}分钟", secs / 60).into()
+    } else {
+        format!("{}秒", secs.max(0)).into()
     }
 }
 
@@ -2642,6 +3068,15 @@ mod subtree_tests {
         todos.iter().find(|t| t.id == id).unwrap().completed
     }
 
+    fn cat_of<'a>(todos: &'a [TodoItem], id: &str) -> Option<&'a str> {
+        todos
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap()
+            .cat_id
+            .as_deref()
+    }
+
     #[test]
     fn parent_is_incomplete_until_all_children_done() {
         let mut todos = vec![
@@ -2712,5 +3147,79 @@ mod subtree_tests {
         let mut todos = vec![node("a", Some("b"), false), node("b", Some("a"), false)];
         sync_subtree_completion(&mut todos, "2026-09-16T12:00:00");
         let _ = todos;
+    }
+
+    #[test]
+    fn subtask_rejects_category_and_top_cascades() {
+        // A (top) -> B -> C. Setting B's category is refused; setting A's
+        // category cascades down the whole subtree so parent/child never diverge.
+        let mut todos = vec![
+            node("a", None, false),
+            node("b", Some("a"), false),
+            node("c", Some("b"), false),
+        ];
+        assert!(!cascade_cat(&mut todos, "b", Some("cat-x".into())));
+        assert_eq!(cat_of(&todos, "a"), None);
+        assert_eq!(cat_of(&todos, "b"), None);
+        assert_eq!(cat_of(&todos, "c"), None);
+
+        assert!(cascade_cat(&mut todos, "a", Some("cat-x".into())));
+        assert_eq!(cat_of(&todos, "a"), Some("cat-x"));
+        assert_eq!(cat_of(&todos, "b"), Some("cat-x"));
+        assert_eq!(cat_of(&todos, "c"), Some("cat-x"), "grandchild follows too");
+
+        // Clearing on the top un-sets the whole subtree.
+        assert!(cascade_cat(&mut todos, "a", None));
+        assert_eq!(cat_of(&todos, "a"), None);
+        assert_eq!(cat_of(&todos, "b"), None);
+        assert_eq!(cat_of(&todos, "c"), None);
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::*;
+
+    /// A `remind_at` timestamp for "now + offset seconds" on today.
+    fn stamp_from_now(offset: i64) -> String {
+        (Local::now() + ChronoDuration::seconds(offset))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    }
+
+    #[test]
+    fn countdown_formats() {
+        assert_eq!(format_countdown(3600), "1时0分");
+        assert_eq!(format_countdown(7260), "2时1分");
+        assert_eq!(format_countdown(59), "59秒");
+        assert_eq!(format_countdown(0), "0秒");
+        assert_eq!(format_countdown(60), "1分钟");
+        assert_eq!(format_countdown(3599), "59分钟");
+    }
+
+    #[test]
+    fn remaining_secs_is_positive_only() {
+        // Future → positive; present/just-past → None (standardizes on "已到点").
+        let future = stamp_from_now(90);
+        assert!(reminder_remaining_secs(&Some(future)).unwrap() > 0);
+        let past = stamp_from_now(-5);
+        assert!(reminder_remaining_secs(&Some(past)).is_none());
+        assert!(reminder_remaining_secs(&None).is_none());
+        assert!(reminder_remaining_secs(&Some("bad".into())).is_none());
+    }
+
+    #[test]
+    fn stamp_round_trips() {
+        // The stored format parses back, matching set_reminder's output shape.
+        let now = Local::now();
+        let stamp = now
+            .date_naive()
+            .and_time(now.time())
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let parsed = parse_remind_at(&stamp).expect("parses");
+        // The parsed diff is well under a second in either direction.
+        let diff = parsed - now.naive_local();
+        assert!(diff.num_milliseconds().abs() < 1000);
     }
 }
