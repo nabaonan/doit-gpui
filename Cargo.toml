@@ -39,3 +39,9 @@ gpui-pre-reqwest = { version = "=0.12.15", default-features = false, features = 
     "socks",
     "stream",
 ] }
+# Encrypt the WebDAV password at rest (and in cloud snapshots): AES-256-GCM
+# (AEAD) with a machine-local random key, stored in a separate key file.
+# RustCrypto crates are pure Rust, no C toolchain needed.
+aes-gcm = "0.10"
+# CSPRNG for key/nonce generation.
+rand = "0.8"

@@ -87,7 +87,12 @@ impl SettingsPanel {
         }));
         subs.push(cx.subscribe::<InputState, InputEvent>(&pass, |this, st, ev, cx| {
             if let InputEvent::Change = ev {
-                this.local.cloud_sync.webdav_password = st.read(cx).value();
+                // Encrypt before persisting: settings are written to disk and
+                // exported in cloud snapshots; never store the plaintext.
+                this.local.cloud_sync.webdav_password =
+                    crate::crypto::encrypt_or_error(&st.read(cx).value())
+                        .unwrap_or_default()
+                        .into();
                 this.push_settings(cx);
             }
         }));
@@ -160,7 +165,13 @@ impl SettingsPanel {
         };
         set(&self.url, settings.cloud_sync.webdav_url.clone());
         set(&self.user, settings.cloud_sync.webdav_username.clone());
-        set(&self.pass, settings.cloud_sync.webdav_password.clone());
+        // Stored password is ciphertext; decrypt for display in the field.
+        set(
+            &self.pass,
+            SharedString::from(crate::crypto::decrypt_for_display(
+                &settings.cloud_sync.webdav_password,
+            )),
+        );
         set(&self.keep_recent, settings.cloud_sync.keep_recent.to_string().into());
         set(&self.backup_interval, settings.auto_backup.interval.to_string().into());
         set(&self.restore_interval, settings.auto_restore.interval.to_string().into());
@@ -673,7 +684,8 @@ impl SettingsPanel {
             (
                 p.local.cloud_sync.webdav_url.trim().to_string(),
                 p.local.cloud_sync.webdav_username.to_string(),
-                p.local.cloud_sync.webdav_password.to_string(),
+                // Stored value is ciphertext — decrypt for the connection test.
+                crate::crypto::decrypt_for_display(&p.local.cloud_sync.webdav_password),
             )
         };
         entity.update(cx, |p, cx| {

@@ -1,6 +1,7 @@
 mod app;
 mod app_assets;
 mod backup;
+mod crypto;
 mod http;
 mod label_dialogs;
 mod settings;
@@ -26,6 +27,9 @@ fn main() {
             gpui_kit::init(cx);
             // Give the OS identity so system notifications show for the app.
             cx.set_app_identity("com.doit.gpui", "Doit");
+            // Prepare the machine-local encryption key up front so WebDAV
+            // password encryption works (and failures surface early).
+            let _ = crypto::ensure_key();
 
             let opts = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

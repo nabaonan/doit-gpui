@@ -39,7 +39,11 @@ impl BackupPanel {
         let pass = cx.new(|cx| InputState::new(window, cx)
             .placeholder("密码")
             .masked(true)
-            .default_value(settings.cloud_sync.webdav_password.clone()));
+            .default_value(
+                // `default_value` takes `impl Into<SharedString>`; a plain
+                // String satisfies it, so no conversion wrapper is needed.
+                crate::crypto::decrypt_for_display(&settings.cloud_sync.webdav_password),
+            ));
 
         Self {
             url,
@@ -64,7 +68,14 @@ impl BackupPanel {
         };
         set(&self.url, settings.cloud_sync.webdav_url.clone());
         set(&self.user, settings.cloud_sync.webdav_username.clone());
-        set(&self.pass, settings.cloud_sync.webdav_password.clone());
+        // Stored password is ciphertext; decrypt for display so the user (and
+        // the sync flow) sees the real value, not the `enc:` blob.
+        set(
+            &self.pass,
+            SharedString::from(crate::crypto::decrypt_for_display(
+                &settings.cloud_sync.webdav_password,
+            )),
+        );
     }
 
     /// The current URL / user / password typed into the panel.
@@ -564,14 +575,17 @@ fn action_status(state: &TransferState, cx: &App) -> impl IntoElement {
 }
 
 /// Mirror the typed config back into the app settings so settings stay in sync.
+/// The password is encrypted at rest (and thus in any exported cloud snapshot);
+/// only the in-memory value used for auth stays plaintext.
 fn push_config(cx: &mut App, cfg: &(String, String, String)) {
     let app = cx.try_global::<DoitAppHandle>().map(|h| h.0.clone());
     if let Some(app) = app {
         let cfg = (cfg.0.clone(), cfg.1.clone(), cfg.2.clone());
+        let password = crate::crypto::encrypt_or_error(&cfg.2).unwrap_or_default();
         app.update(cx, |app, cx| {
             app.settings.cloud_sync.webdav_url = cfg.0.into();
             app.settings.cloud_sync.webdav_username = cfg.1.into();
-            app.settings.cloud_sync.webdav_password = cfg.2.into();
+            app.settings.cloud_sync.webdav_password = password.into();
             app.settings.cloud_sync.enabled = true;
             app.save_local();
             cx.notify();
