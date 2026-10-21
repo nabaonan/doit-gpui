@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "doit-gpui"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "aes-gcm",
  "base64",
