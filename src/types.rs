@@ -203,3 +203,25 @@ pub const COLOR_PALETTE: &[(&str, &str)] = &[
     ("fuchsia", "#D946EF"),
     ("pink", "#EC4899"),
 ];
+
+#[cfg(test)]
+mod sync_contract_tests {
+    use super::*;
+
+    /// Cloud sync must carry tags & categories inside `settings` — the snapshot
+    /// JSON round-trips them, so a pull on another machine restores them.
+    #[test]
+    fn snapshot_serializes_tags_and_categories() {
+        let mut settings = AppSettings::default();
+        settings.tags.push(Tag { id: "tag-new".into(), name: "新标签".into(), color: "#FF0000".into() });
+        settings.categories.push(Category { id: "cat-new".into(), name: "新分类".into(), color: "#00FF00".into() });
+        let snap = SyncSnapshot { version: 1, exported_at: "2026-01-01T00:00:00".into(), todos: vec![], settings };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("tag-new"), "tags not in snapshot JSON: {json}");
+        assert!(json.contains("cat-new"), "categories not in snapshot JSON: {json}");
+        // round-trip
+        let back: SyncSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.settings.tags.len(), 3);
+        assert_eq!(back.settings.categories.len(), 3);
+    }
+}

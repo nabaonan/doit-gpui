@@ -198,12 +198,23 @@ impl SettingsPanel {
     }
 
     /// Mirror the working copy into the application's settings entity.
+    /// Tags / categories / default category are edited by the dedicated label
+    /// panels (which write straight into `app.settings` via `set_tags` /
+    /// `set_categories`), so they must NOT be overwritten here with this
+    /// panel's possibly-stale snapshot — otherwise a later unrelated setting
+    /// change (theme, shortcut…) would silently roll back any labels added
+    /// since the settings page was opened, and that content would never reach
+    /// the cloud sync.
     fn push_settings(&mut self, cx: &mut Context<Self>) {
         let app = cx
             .try_global::<DoitAppHandle>()
             .map(|h| h.0.clone());
         if let Some(app) = app {
-            let settings = self.local.clone();
+            let mut settings = self.local.clone();
+            let current = app.read(cx);
+            settings.tags = current.settings.tags.clone();
+            settings.categories = current.settings.categories.clone();
+            settings.default_category_id = current.settings.default_category_id.clone();
             app.update(cx, |app, cx| {
                 app.settings = settings;
                 app.save_local();
