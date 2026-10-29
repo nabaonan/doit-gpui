@@ -6,8 +6,8 @@ description = "Doit - A minimalist todo app rewritten in pure Rust with GPUI Kit
 
 [dependencies]
 # gpui-kit bundles gpui (gpui-pre) at a matching revision; bumping it upgrades
-# gpui itself to the bundled gpui-pre (0.3.8 as of gpui-kit 0.7.1).
-gpui-kit = "=0.7.1"
+# gpui itself to the bundled gpui-pre (0.3.10 as of gpui-kit 0.8.1).
+gpui-kit = "=0.8.1"
 # chrono is already a compiled dependency of gpui itself (its calendar/date-picker
 # link it); adding it here costs no new compilation. Needed for correct local-date
 # handling (calendar view, timeline grouping) that std alone cannot provide.
@@ -25,8 +25,9 @@ futures = "0.3"
 # reqwest-backed WebDAV requests run on a real Tokio runtime regardless of gpui's
 # own executor.
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
-# gpui-pre-reqwest is gpui's own vendored reqwest (already a transitive
-# dependency). We build the desktop HTTP client from it with proxies disabled,
+# gpui-pre-reqwest is gpui's own vendored reqwest fork (0.12.15 is its latest
+# release, matching gpui-pre 0.3.x). We build the desktop HTTP client from it
+# with proxies disabled,
 # because OS/environment proxies are the most common reason a private NAS
 # WebDAV endpoint fails with "error sending request for url". The feature set
 # mirrors gpui-pre-reqwest-client's, so nothing new gets compiled.

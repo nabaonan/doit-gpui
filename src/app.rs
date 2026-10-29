@@ -36,7 +36,7 @@ use gpui_kit::gpui::{
     ElementId, Entity, Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
     IntoElement, LayoutId, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Position,
     Render, SharedString, Size, Style, Styled, Subscription, SystemNotification, Window,
-    WindowAppearance, px, relative,
+    WindowAppearance, linear_color_stop, px, relative, rgb,
 };
 use std::collections::{HashMap, HashSet};
 use std::cell::Cell;
@@ -278,7 +278,7 @@ impl DoitApp {
         let input_sub = cx.subscribe::<InputState, InputEvent>(&input_clone, |_this, _st, _ev, _cx| {});
 
         // Apply the stored theme on startup.
-        Theme::change(initial_theme(&settings, window), Some(window), cx);
+        change_theme(initial_theme(&settings, window), window, cx);
 
         let backup_panel = cx.new(|cx| BackupPanel::new(&settings, window, cx));
         let settings_panel = cx.new(|cx| SettingsPanel::new(settings.clone(), window, cx));
@@ -530,7 +530,7 @@ impl DoitApp {
         // matches the cloud, so a follow-up sync won't keep warning.
         self.last_modified = snap.exported_at;
         let mode = initial_theme(&self.settings, window);
-        Theme::change(mode, Some(window), cx);
+        change_theme(mode, window, cx);
         if let CatFilter::Id(ref id) = self.cat_filter {
             if !self.settings.categories.iter().any(|c| c.id == *id) {
                 self.cat_filter = CatFilter::None;
@@ -2525,11 +2525,17 @@ impl DoitApp {
         // Pie: completed vs incomplete within the range.
         let done = self.completed_in_range(start, end);
         let open = self.incomplete_in_range(start, end);
+        // Completed shares the mint fill with the bar chart; the remainder is a
+        // soft neutral so the ring reads airy instead of heavy charcoal.
+        let pie_open = cx.theme().muted_foreground.opacity(0.3);
         let pies = vec![
-            PieDatum { value: done as f32, color: cx.theme().success },
+            PieDatum {
+                value: done as f32,
+                color: cx.theme().chart_1,
+            },
             PieDatum {
                 value: open as f32,
-                color: cx.theme().muted_foreground,
+                color: pie_open,
             },
         ];
 
@@ -2566,7 +2572,12 @@ impl DoitApp {
                                     BarChart::new(bars)
                                         .band(|d| d.label.clone())
                                         .value(|d| d.value)
-                                        .fill(move |_, _, _, _| chart_1)
+                                        .fill_gradient(move |_, _, _| {
+                                            [
+                                                linear_color_stop(chart_1, 0.0),
+                                                linear_color_stop(chart_1.opacity(0.35), 1.0),
+                                            ]
+                                        })
                                         .value_axis(true)
                                         .tick_margin(2),
                                 ),
@@ -2593,7 +2604,8 @@ impl DoitApp {
                                         PieChart::new(pies)
                                             .value(|d| d.value)
                                             .color(|d| d.color)
-                                            .outer_radius(80.),
+                                            .outer_radius(80.)
+                                            .inner_radius(48.),
                                     ),
                             )
                             .child(
@@ -2602,13 +2614,8 @@ impl DoitApp {
                                     .items_center()
                                     .justify_center()
                                     .gap_4()
-                                    .child(stats_legend(cx.theme().success, "已完成", done, cx))
-                                    .child(stats_legend(
-                                        cx.theme().muted_foreground,
-                                        "未完成",
-                                        open,
-                                        cx,
-                                    )),
+                                    .child(stats_legend(chart_1, "已完成", done, cx))
+                                    .child(stats_legend(pie_open, "未完成", open, cx)),
                             ),
                     ),
             )
@@ -2675,7 +2682,9 @@ impl DoitApp {
 
         let bg = cx.theme().background;
         let mute = cx.theme().muted_foreground;
-        let accent = cx.theme().success;
+        // Same mint family as the bar/line charts so the whole stats page
+        // speaks one accent system.
+        let accent = cx.theme().chart_1;
         // 5-step ramp: empty -> faint -> deeper greens -> full accent.
         let empty_c = bg.blend(mute.alpha(0.18));
         let c1 = bg.blend(accent.alpha(0.28));
@@ -3829,6 +3838,34 @@ fn initial_theme(settings: &AppSettings, window: &Window) -> ThemeMode {
             _ => ThemeMode::Light,
         },
     }
+}
+
+/// Product chart palette: a soft celadon mint for completed volume and a deep
+/// teal for the trend line, with cool spares for future series. The stock ramp
+/// is all blue, which fights the green completion language used by the
+/// checkbox and the heatmap; the previous emerald was still too vivid next to
+/// white cards, so this scale drops saturation and shifts a touch cooler.
+/// Values live here as theme tokens (never at chart call sites) and every
+/// switch re-applies them, because loading a mode resets the colors.
+fn apply_chart_palette(cx: &mut App) {
+    Theme::update(cx, |theme| {
+        let (c1, c2, c3, c4, c5) = if theme.mode.is_dark() {
+            (0x6bd8bd, 0x33b79b, 0x7dd3fc, 0xc4b5fd, 0xcbd5e1)
+        } else {
+            (0x4ac6a8, 0x14907b, 0x38bdf8, 0xa78bfa, 0x94a3b8)
+        };
+        theme.colors.chart_1 = rgb(c1).into();
+        theme.colors.chart_2 = rgb(c2).into();
+        theme.colors.chart_3 = rgb(c3).into();
+        theme.colors.chart_4 = rgb(c4).into();
+        theme.colors.chart_5 = rgb(c5).into();
+    });
+}
+
+/// Switch the app theme and keep the product chart palette on top of it.
+pub(crate) fn change_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
+    Theme::change(mode, Some(window), cx);
+    apply_chart_palette(cx);
 }
 
 #[cfg(test)]

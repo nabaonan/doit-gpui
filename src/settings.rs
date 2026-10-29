@@ -5,7 +5,7 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::{
-    ActiveTheme, Sizable, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Sizable, ThemeMode, WindowExt,
     button::Button,
     input::{Input, InputState, InputEvent},
     kbd::Kbd,
@@ -234,7 +234,7 @@ impl SettingsPanel {
                 _ => ThemeMode::Light,
             },
         };
-        Theme::change(mode, Some(window), cx);
+        crate::app::change_theme(mode, window, cx);
         self.push_settings(cx);
     }
 }
