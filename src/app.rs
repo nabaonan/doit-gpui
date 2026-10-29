@@ -32,11 +32,15 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
-    self, div, AnyElement, AnyView, App, Hsla, Context, Entity, Global, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, SystemNotification,
-    Window, WindowAppearance, px, relative, ElementId,
+    self, div, AnyElement, AnyView, App, Bounds, Context, CursorStyle, Element,
+    ElementId, Entity, Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement,
+    IntoElement, LayoutId, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Position,
+    Render, SharedString, Size, Style, Styled, Subscription, SystemNotification, Window,
+    WindowAppearance, px, relative,
 };
 use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 // ── Global handle for context-menu callbacks ────────────────────────────────
@@ -126,6 +130,11 @@ pub struct DoitApp {
     stats_month: (i32, u32),
     stats_week_offset: i32,
 
+    /// 热力图格的可用宽度：由渲染期的高度探测元素回填（见 `HeatmapWidthProbe`）。
+    /// taffy 对 flex 子项按 ContentSize 测量，`aspect_ratio` 会被忽略，所以格子
+    /// 的高度无法由列宽推导，必须实测布局宽度后再算。
+    heatmap_width: Rc<Cell<f32>>,
+
     /// Inline editing of a todo's content (used by the row + context menu).
     editing_id: Option<String>,
     edit_input: Entity<InputState>,
@@ -149,8 +158,87 @@ pub struct DoitApp {
     /// view (in-memory only).
     collapsed: HashSet<String>,
 
+    /// 设置弹框的当前尺寸。右下角有拖拽把手，可手动调整；本次会话内记住，
+    /// 不写入设置文件（避免动持久化 schema）。
+    settings_dialog_size: (Pixels, Pixels),
+    /// 正在手动调整设置弹框尺寸时的状态：(按下点, 起始宽, 起始高)。
+    settings_resize: Option<(Point<Pixels>, Pixels, Pixels)>,
+
     _input_sub: Subscription,
     _calendar_sub: Subscription,
+}
+
+/// 零高度的宽度探测元素：渲染时拿到父级给出的真实可用宽度，回填到
+/// `DoitApp::heatmap_width`，并在宽度变化时请求下一帧重绘，让热力图格子按
+/// 实测宽度算成正方形（宽度变化只滞后一帧，肉眼不可见）。
+struct HeatmapWidthProbe {
+    width: Rc<Cell<f32>>,
+    app: Entity<DoitApp>,
+}
+
+impl Element for HeatmapWidthProbe {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = px(0.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let width: f32 = bounds.size.width.into();
+        if (width - self.width.get()).abs() > 0.5 {
+            self.width.set(width);
+            let app = self.app.clone();
+            window.defer(cx, move |_window, cx| {
+                app.update(cx, |_, cx| cx.notify());
+            });
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
+    }
+}
+
+impl IntoElement for HeatmapWidthProbe {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 impl DoitApp {
@@ -255,11 +343,14 @@ impl DoitApp {
             calendar_state,
             selected_cal_date: today.format("%Y-%m-%d").to_string(),
             collapsed: HashSet::new(),
+            settings_dialog_size: (px(720.), px(500.)),
+            settings_resize: None,
             _input_sub: input_sub,
             _calendar_sub: calendar_sub,
             stats_period: StatsPeriod::Month,
             stats_month: current_ym(),
             stats_week_offset: 0,
+            heatmap_width: Rc::new(Cell::new(0.0)),
             editing_id: None,
             edit_input,
             _edit_sub: edit_sub,
@@ -346,6 +437,21 @@ impl DoitApp {
         cx.notify();
     }
 
+    fn drop_todo(&mut self, dragged: &str, slot: &DropSlot, cx: &mut Context<Self>) {
+        let Some(new_parent) = move_todo_in_list(&mut self.todos, dragged, slot) else {
+            return;
+        };
+        // 落到折叠的父级里：展开它，否则刚拖进去就"消失"了。
+        if let Some(pid) = new_parent {
+            self.collapsed.remove(&pid);
+        }
+        // 父子完成状态联动：把子任务挪进/挪出已完成父级都要重新推导。
+        sync_subtree_completion(&mut self.todos, &now_iso());
+        self.last_modified = now_iso();
+        self.save_local();
+        cx.notify();
+    }
+
     /// Add a subtask under `parent_id` and drop the user straight into inline
     /// edit so they can name it. The child inherits the parent's tag/category
     /// so it stays visible under the same category filter.
@@ -353,11 +459,14 @@ impl DoitApp {
         let Some(parent) = self.todos.iter().find(|t| t.id == parent_id) else {
             return;
         };
-        let siblings = self
+        // 拖拽重排会把 order 全局重编号，兄弟"个数"不再等于下一个空位，取最大值 +1。
+        let next_order = self
             .todos
             .iter()
             .filter(|t| t.parent_id.as_deref() == Some(parent_id))
-            .count() as u32;
+            .map(|t| t.order)
+            .max()
+            .map_or(0, |order| order + 1);
         let id = format!("t{}", self.next_id);
         self.next_id += 1;
         self.todos.push(TodoItem {
@@ -366,7 +475,7 @@ impl DoitApp {
             completed: false,
             created_at: now_iso(),
             completed_at: None,
-            order: siblings,
+            order: next_order,
             tag_id: parent.tag_id.clone(),
             cat_id: parent.cat_id.clone(),
             parent_id: Some(parent_id.to_string()),
@@ -995,19 +1104,221 @@ impl DoitApp {
                             .small()
                             .tooltip("设置")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                let panel = this.settings_panel.clone();
-                                let base = this.settings.clone();
-                                panel.update(cx, |p, cx| p.sync_from(base, window, cx));
-                                window.open_dialog(cx, move |dialog, _window, _cx| {
-                                    dialog
-                                        .title("设置")
-                                        .w(px(720.))
-                                        .h(px(500.))
-                                        .child(panel.clone())
-                                });
+                                open_settings_dialog(this, window, cx);
                             })),
                     ),
             )
+    }
+}
+
+// ── Resizable settings dialog ───────────────────────────────────────────────
+
+/// 打开设置弹框。尺寸每帧从 app 读，右下角把手拖动时实时改变弹框大小，
+/// 拖完本次会话内保持。
+fn open_settings_dialog(app: &mut DoitApp, window: &mut Window, cx: &mut App) {
+    let panel = app.settings_panel.clone();
+    let base = app.settings.clone();
+    panel.update(cx, |p, cx| p.sync_from(base, window, cx));
+    window.open_dialog(cx, move |dialog, _window, cx| {
+        let (dialog_w, dialog_h) = cx
+            .try_global::<DoitAppHandle>()
+            .map(|h| h.0.read(cx).settings_dialog_size)
+            .unwrap_or((px(720.), px(500.)));
+        let mut body = div().relative().size_full().child(panel.clone());
+        if let Some(app) = cx.try_global::<DoitAppHandle>().map(|h| h.0.clone()) {
+            body = body
+                .child(settings_resize_grip(app.clone(), cx))
+                .child(SettingsResizeTracker::new(app));
+        }
+        dialog.title("设置").w(dialog_w).h(dialog_h).child(body)
+    });
+}
+
+/// 设置弹框右下角的手动调整尺寸把手（三道递增的短横线，命中区 14px）。
+fn settings_resize_grip(app: Entity<DoitApp>, cx: &mut App) -> AnyElement {
+    let bar_color = cx.theme().muted_foreground;
+    let hover_bg = cx.theme().muted;
+    let bar = |width: Pixels| {
+        div()
+            .w(width)
+            .h(px(1.5))
+            .rounded_full()
+            .bg(bar_color)
+    };
+    div()
+        .id("settings-resize-grip")
+        .absolute()
+        .right(px(1.))
+        .bottom(px(1.))
+        .size(px(14.))
+        .flex()
+        .items_end()
+        .justify_end()
+        .p(px(3.))
+        .rounded_sm()
+        .cursor(CursorStyle::ResizeUpRightDownLeft)
+        .hover(move |s| s.bg(hover_bg))
+        .on_mouse_down(gpui::MouseButton::Left, {
+            let app = app.clone();
+            move |event, _window, cx| {
+                app.update(cx, |app, cx| app.begin_settings_resize(event.position, cx));
+            }
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(2.))
+                .child(bar(px(8.)))
+                .child(bar(px(5.)))
+                .child(bar(px(2.))),
+        )
+        .into_any_element()
+}
+
+/// 手动调整设置弹框尺寸时跟随指针的全局鼠标监听。
+///
+/// `window.on_mouse_event` 只能在 paint 阶段注册、且只对下一帧生效，所以每帧
+/// 都要随弹框重新挂一次；监听挂在 window 上（而不是元素 hitbox 上），指针拖出
+/// 弹框范围也能继续收到 MouseMove，不丢事件。
+struct SettingsResizeTracker {
+    app: Entity<DoitApp>,
+}
+
+impl SettingsResizeTracker {
+    fn new(app: Entity<DoitApp>) -> Self {
+        Self { app }
+    }
+}
+
+impl IntoElement for SettingsResizeTracker {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for SettingsResizeTracker {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // 1×1 的绝对定位占位节点：不参与面板布局，但保证每帧都被绘制，
+        // 从而每帧都能注册一次全局鼠标监听。
+        let mut style = Style::default();
+        style.position = Position::Absolute;
+        style.size = Size::new(px(1.).into(), px(1.).into());
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        ()
+    }
+
+    fn paint(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // 只在拖拽进行中挂监听，平时不拦截任何鼠标事件。
+        if self.app.read(cx).settings_resize.is_none() {
+            return;
+        }
+        let app = self.app.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if !phase.bubble() {
+                return;
+            }
+            let app = app.clone();
+            app.update(cx, |app, cx| {
+                app.drag_settings_resize(event.position, event.pressed_button, window, cx)
+            });
+        });
+        let app = self.app.clone();
+        window.on_mouse_event(move |_event: &MouseUpEvent, phase, _window, cx| {
+            if !phase.bubble() {
+                return;
+            }
+            let app = app.clone();
+            app.update(cx, |app, cx| app.end_settings_resize(cx));
+        });
+    }
+}
+
+impl DoitApp {
+    /// 记下设置弹框右下角把手的按下点，开始手动调整尺寸。
+    fn begin_settings_resize(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.settings_resize = Some((
+            position,
+            self.settings_dialog_size.0,
+            self.settings_dialog_size.1,
+        ));
+        cx.notify();
+    }
+
+    /// 拖动中：新尺寸 = 起始尺寸 + 指针位移，并夹在窗口可用范围内。指针已松开
+    /// （在弹框外松开导致漏掉 MouseUp）时直接结束本次调整。
+    fn drag_settings_resize(
+        &mut self,
+        position: Point<Pixels>,
+        pressed_button: Option<gpui::MouseButton>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((start, start_w, start_h)) = self.settings_resize else {
+            return;
+        };
+        if pressed_button.is_none() {
+            self.end_settings_resize(cx);
+            return;
+        }
+        let view = window.viewport_size();
+        let max_w = (view.width - px(64.)).max(px(560.));
+        let max_h = (view.height - px(120.)).max(px(420.));
+        // 弹框水平方向是居中的（组件按 (视口 - 宽) / 2 定位），宽度每加 1px，
+        // 右边只外扩 0.5px；所以水平位移乘 2，让右下角始终贴着指针走。
+        let width = (start_w + (position.x - start.x) * 2.0).clamp(px(560.), max_w);
+        let height = (start_h + (position.y - start.y)).clamp(px(420.), max_h);
+        if (width, height) != self.settings_dialog_size {
+            self.settings_dialog_size = (width, height);
+            cx.notify();
+        }
+    }
+
+    /// 松开鼠标，结束手动调整。
+    fn end_settings_resize(&mut self, cx: &mut Context<Self>) {
+        if self.settings_resize.take().is_some() {
+            cx.notify();
+        }
     }
 }
 
@@ -1108,14 +1419,23 @@ impl DoitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        items
+        let roots: Vec<&TodoItem> = items
             .iter()
             .filter(|t| match &t.parent_id {
                 None => true,
                 Some(pid) => !items.iter().any(|o| o.id == *pid),
             })
-            .map(|root| self.render_todo_node(root, items, tags, 0, window, cx))
-            .collect()
+            .collect();
+        let mut out: Vec<AnyElement> = Vec::with_capacity(roots.len() + 1);
+        for root in roots.iter() {
+            out.push(self.render_todo_node(root, items, tags, 0, window, cx));
+        }
+        // 末尾热区：最后一行若是子任务，它的下边缘只能插到父级内部，所以补一条
+        // "追加到顶层末尾"的落点，否则想排到最末无处可落。
+        if !roots.is_empty() {
+            out.push(render_drop_tail());
+        }
+        out
     }
 
     fn render_todo_node(
@@ -1237,6 +1557,20 @@ impl DoitApp {
             None
         };
         let press_secs = (self.settings.long_press_duration.max(1)) as f32;
+        // 子任务每深一层多缩一格，让子任务的箭头正对父级文字起点。拖拽热区也用
+        // 同一个缩进，插入线才和该层的内容起点对齐。
+        let indent_step = if longpress {
+            SUBTASK_INDENT_LONGPRESS
+        } else {
+            SUBTASK_INDENT
+        };
+        let indent = 12. + indent_step * depth as f32;
+        // 拖拽落点的合法性（can_drop 只做视觉反馈，真正的校验在 drop_todo）：
+        // · 行边缘热区把行插到"本行的父级"这一层 → 本行及其祖先都不能拖到这里，
+        //   否则父级会被塞进自己的子树里；
+        // · 标题正文区是"成为本行的最后一个子任务" → 本行整棵子树都不能拖上来。
+        let band_blockers = ancestor_ids(&self.todos, &id);
+        let into_blockers = collect_subtree(&self.todos, &id);
 
         div()
             .id(ElementId::Name(id.clone().into()))
@@ -1282,19 +1616,37 @@ impl DoitApp {
                         ),
                 )
             })
-            // Nest subtasks under their parent: additive on top of the base
-            // 12px padding, one extra indent step per depth. Long-press mode
-            // has no checkbox slot, so it uses a tighter indent so a subtask's
-            // chevron still lands under its parent's text start.
-            .when(depth > 0, |el| {
-                let step = if longpress {
-                    SUBTASK_INDENT_LONGPRESS
-                } else {
-                    SUBTASK_INDENT
-                };
-                el.pl(px(12. + step * depth as f32))
-            })
+            .pl(px(indent))
             .hover(|s| s.bg(cx.theme().muted))
+            // 拖拽源：整行可拖（编辑态除外，否则会抢走输入框里的选字手势）。拖动
+            // 超过 gpui 的 2px 阈值才成立，单击/双击不受影响。
+            .when(!is_editing, |el| {
+                el.cursor_grab().on_drag(
+                    TodoDrag {
+                        id: id.clone().into(),
+                        content: content.clone().into(),
+                    },
+                    move |drag, _offset, _window, cx| {
+                        let mut descendants = 0;
+                        if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                            let app = handle.0.clone();
+                            // 一开始拖就撤销长按计时，否则拖着拖着会被"完成"截胡。
+                            app.update(cx, |app, cx| {
+                                if app.long_press.is_some() {
+                                    app.long_press = None;
+                                    cx.notify();
+                                }
+                            });
+                            let todos = app.read(cx);
+                            descendants = collect_subtree(&todos.todos, &drag.id).len() - 1;
+                        }
+                        cx.new(|_| DragGhost {
+                            content: drag.content.clone(),
+                            descendants,
+                        })
+                    },
+                )
+            })
             // 长按完成模式：整行都是可长按完成区域（父任务/编辑中除外）。
             .when(longpress && !has_children && !is_editing, |el| {
                 let down_id = id.clone();
@@ -1684,15 +2036,59 @@ impl DoitApp {
                         )
                         .into_any_element()
                 } else {
+                    let edit_id = id.clone();
+                    let edit_content = content.clone();
                     div()
                         .flex_1()
                         .min_w_0()
+                        .id(ElementId::Name(format!("title-{}", &id).into()))
                         .text_color(if completed {
                             cx.theme().muted_foreground
                         } else {
                             cx.theme().foreground
                         })
                         .when(completed, |el| el.line_through())
+                        .rounded_sm()
+                        // 拖到标题正文上 = 成为本行的最后一个子任务。标注/勾选框
+                        // 不参与这个落点，避免"拖到复选框上想插到前面"时误嵌套。
+                        .can_drop({
+                            let blocked = into_blockers.clone();
+                            move |value, _, _| {
+                                value.downcast_ref::<TodoDrag>().is_some_and(|drag| {
+                                    !blocked.iter().any(|id| id == &*drag.id)
+                                })
+                            }
+                        })
+                        .on_drop::<TodoDrag>({
+                            let slot = DropSlot::LastChild(id.clone());
+                            move |drag, _window, cx| {
+                                if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                    let app = handle.0.clone();
+                                    let id = drag.id.to_string();
+                                    app.update(cx, |app, cx| app.drop_todo(&id, &slot, cx));
+                                    cx.stop_propagation();
+                                }
+                            }
+                        })
+                        .drag_over::<TodoDrag>(move |style, _, _, cx| {
+                            style
+                                .bg(cx.theme().drop_target.opacity(0.25))
+                                .rounded_sm()
+                        })
+                        .on_click(move |event, window, cx| {
+                            // 双击标题进入编辑（Finder/资源管理器的重命名习惯）。
+                            // 单击不承担动作：勾选靠勾选框，长按靠按住整行，所以
+                            // 这里只认双击，避免误触。
+                            if event.click_count() != 2 {
+                                return;
+                            }
+                            if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                                let app = handle.0.clone();
+                                app.update(cx, |app, cx| {
+                                    app.start_edit(&edit_id, &edit_content, window, cx)
+                                });
+                            }
+                        })
                         .child(content.clone())
                         .into_any_element()
                 },
@@ -1725,6 +2121,29 @@ impl DoitApp {
                         )
                     },
                 )
+            })
+            // 拖拽落点热区：上下各 8px 的贴边条，落在上面 = 插到本行的前/后。
+            // 最后画（就在最上层），且只占行的内边距区域，不会挡勾选框/文字的
+            // 点击、双击。
+            .children(if is_editing {
+                Vec::new()
+            } else {
+                // 有展开的子任务时，下边缘自然接的是"第一个子任务"，直接插到
+                // 父级内部比插到父级之后更符合手感。
+                let bottom = if has_children && !collapsed {
+                    DropSlot::FirstChild(id.clone())
+                } else {
+                    DropSlot::After(id.clone())
+                };
+                vec![
+                    render_drop_band(
+                        BandEdge::Top,
+                        DropSlot::Before(id.clone()),
+                        indent,
+                        band_blockers.clone(),
+                    ),
+                    render_drop_band(BandEdge::Bottom, bottom, indent, band_blockers),
+                ]
             })
     }
 }
@@ -2282,10 +2701,20 @@ impl DoitApp {
             }
         }
 
+        // 格子尺寸：宽度由 flex 均分，高度必须显式给出才是正方形。
+        // 可用宽度 = 左侧星期栏 16 + 栏间距 4 + 52 格 + 51 个 4px 间距。
+        let avail = self.heatmap_width.get();
+        let cell_h = if avail > 0.0 {
+            ((avail - (16.0 + 4.0 + 51.0 * 4.0)) / 52.0).clamp(4.0, 64.0)
+        } else {
+            0.0
+        };
+
         let cell = |row: usize| -> AnyElement {
             div()
                 .flex()
                 .flex_1()
+                .items_start()
                 .gap_1()
                 .children((0..52).map(|w| {
                     let day = start + Days::new(w as u64 * 7 + row as u64);
@@ -2298,7 +2727,9 @@ impl DoitApp {
                         ))
                         .flex_1()
                         .min_w_0()
-                        .h(px(10.))
+                        // 宽度由列均分，高度 = 实测可用宽度算出的单格边长：
+                        // 格子始终是正方形，宽窗口下也不会被拉成扁条。
+                        .h(px(cell_h))
                         .rounded(px(2.))
                         .bg(c);
                     // Hover a completed day to see the exact date and count.
@@ -2330,7 +2761,7 @@ impl DoitApp {
                     .child(
                         div()
                             .w(px(16.))
-                            .h(px(10.))
+                            .h(px(cell_h.max(10.)))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2403,9 +2834,20 @@ impl DoitApp {
                             .child(format!("最近 52 周 · 共完成 {total} 个待办 · 活跃 {active} 天")),
                     ),
             )
-            .child(month_row)
-            .child(div().v_flex().gap_1().children(rows))
-            .child(legend)
+            .child(
+                div()
+                    .w_full()
+                    .v_flex()
+                    .gap_2()
+                    // 先渲染宽度探针，回填本帧可用宽度供下一帧算格子尺寸。
+                    .child(HeatmapWidthProbe {
+                        width: self.heatmap_width.clone(),
+                        app: cx.entity(),
+                    })
+                    .child(month_row)
+                    .child(div().v_flex().gap_1().children(rows))
+                    .child(legend),
+            )
             .when(active == 0, |el| {
                 el.child(
                     div()
@@ -2821,6 +3263,337 @@ fn child_ids_of<'a>(items: &'a [TodoItem], parent_id: &str) -> Vec<&'a TodoItem>
         .iter()
         .filter(|t| t.parent_id.as_deref() == Some(parent_id))
         .collect()
+}
+
+// ── Drag & drop reordering ──────────────────────────────────────────────────
+
+/// Payload carried while a todo row is being dragged. Dragging a row always
+/// moves its whole subtree, so only the root id + its text travel with the
+/// pointer; the children are resolved from `self.todos` on drop.
+struct TodoDrag {
+    id: SharedString,
+    content: SharedString,
+}
+
+/// The floating preview that follows the pointer during a drag.
+struct DragGhost {
+    content: SharedString,
+    descendants: usize,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .max_w(px(320.))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_sm()
+            .text_color(cx.theme().popover_foreground)
+            .child(div().min_w_0().truncate().child(self.content.clone()))
+            .when(self.descendants > 0, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("+{} 项子任务", self.descendants)),
+                )
+            })
+    }
+}
+
+/// Where a dragged todo should land. Every visible row contributes three of
+/// these: two edge bands for "insert as a sibling at this boundary" and the
+/// row body for "append as my last child"; the forest adds a trailing root slot.
+#[derive(Clone)]
+enum DropSlot {
+    /// Insert before the given row, under the same parent.
+    Before(String),
+    /// Insert after the given row, under the same parent.
+    After(String),
+    /// Insert as the first child of the given row.
+    FirstChild(String),
+    /// Append as the last child of the given row.
+    LastChild(String),
+    /// Append at the very end of the top-level list.
+    RootEnd,
+}
+
+/// Which edge band of a row produced a drop; only selects the indicator border.
+#[derive(Clone, Copy)]
+enum BandEdge {
+    Top,
+    Bottom,
+}
+
+/// `id` plus every descendant, in breadth-first order. A visited set keeps
+/// malformed parent cycles in loaded data from looping forever.
+fn collect_subtree(todos: &[TodoItem], id: &str) -> Vec<String> {
+    let mut out = vec![id.to_string()];
+    let mut seen: HashSet<String> = out.iter().cloned().collect();
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i].clone();
+        for t in todos.iter() {
+            if t.parent_id.as_deref() == Some(parent.as_str()) && seen.insert(t.id.clone()) {
+                out.push(t.id.clone());
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `id` followed by its ancestors, bottom-up. Cycle-safe.
+fn ancestor_ids(todos: &[TodoItem], id: &str) -> Vec<String> {
+    let mut out = vec![id.to_string()];
+    let mut current = id.to_string();
+    for _ in 0..=todos.len() {
+        let Some(parent) = todos
+            .iter()
+            .find(|t| t.id == current)
+            .and_then(|t| t.parent_id.clone())
+        else {
+            break;
+        };
+        if out.contains(&parent) {
+            break;
+        }
+        out.push(parent.clone());
+        current = parent;
+    }
+    out
+}
+
+/// Interpret `slot` against the list that results from removing the dragged
+/// subtree: returns the target parent (None = top level) and the insertion
+/// index among that parent's children. Rejects slots that would nest an item
+/// inside its own subtree.
+fn resolve_drop_slot(
+    todos: &[TodoItem],
+    moving: &HashSet<String>,
+    slot: &DropSlot,
+) -> Option<(Option<String>, usize)> {
+    let kept: Vec<&TodoItem> = todos.iter().filter(|t| !moving.contains(&t.id)).collect();
+    let siblings = |parent: Option<&str>| -> Vec<&str> {
+        kept.iter()
+            .filter(|t| t.parent_id.as_deref() == parent)
+            .map(|t| t.id.as_str())
+            .collect()
+    };
+
+    match slot {
+        DropSlot::Before(target) | DropSlot::After(target) => {
+            let item = kept.iter().find(|t| t.id == *target)?;
+            let parent = item.parent_id.clone();
+            if parent.as_deref().is_some_and(|p| moving.contains(p)) {
+                return None;
+            }
+            let position = siblings(parent.as_deref())
+                .iter()
+                .position(|id| *id == target.as_str())?;
+            let index = position + usize::from(matches!(slot, DropSlot::After(_)));
+            Some((parent, index))
+        }
+        DropSlot::FirstChild(parent) => {
+            if moving.contains(parent) {
+                return None;
+            }
+            Some((Some(parent.clone()), 0))
+        }
+        DropSlot::LastChild(parent) => {
+            if moving.contains(parent) {
+                return None;
+            }
+            Some((Some(parent.clone()), siblings(Some(parent)).len()))
+        }
+        DropSlot::RootEnd => Some((None, siblings(None).len())),
+    }
+}
+
+/// Pure core of a drop: rebuild `todos` so `dragged` (plus its whole subtree)
+/// lands at `slot`. Returns the adopted parent on success, `None` when the slot
+/// is invalid (unknown target / would nest an item inside its own subtree).
+///
+/// The array order of `todos` is the on-screen order, so the list is rebuilt
+/// depth-first instead of patching the rows around the drop. `order` follows
+/// the new array index (it stays a working backup sort key), and the moved
+/// subtree adopts its new parent's category — 分类只归属顶层任务，父级与子任务
+/// 永不落入不同分类。
+fn move_todo_in_list(
+    todos: &mut Vec<TodoItem>,
+    dragged: &str,
+    slot: &DropSlot,
+) -> Option<Option<String>> {
+    if !todos.iter().any(|t| t.id == dragged) {
+        return None;
+    }
+    let moving = collect_subtree(todos, dragged);
+    let moving_set: HashSet<String> = moving.iter().cloned().collect();
+    let (new_parent, index) = resolve_drop_slot(todos, &moving_set, slot)?;
+    let new_cat = new_parent
+        .as_ref()
+        .and_then(|pid| todos.iter().find(|t| t.id == *pid))
+        .and_then(|t| t.cat_id.clone());
+
+    let display: Vec<String> = todos.iter().map(|t| t.id.clone()).collect();
+    let mut items: HashMap<String, TodoItem> =
+        todos.drain(..).map(|t| (t.id.clone(), t)).collect();
+    // 父级缺失的行按顶层处理，避免重建树时把行弄丢。
+    let known: HashSet<String> = items.keys().cloned().collect();
+    for item in items.values_mut() {
+        if let Some(pid) = item.parent_id.clone() {
+            if !known.contains(&pid) {
+                item.parent_id = None;
+            }
+        }
+    }
+
+    // 兄弟表（已摘掉被拖的整棵子树），再把被拖的根插到落点。
+    let mut siblings: HashMap<Option<String>, Vec<String>> = HashMap::new();
+    for id in &display {
+        if moving_set.contains(id) {
+            continue;
+        }
+        if let Some(item) = items.get(id) {
+            siblings
+                .entry(item.parent_id.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    if let Some(item) = items.get_mut(dragged) {
+        item.parent_id = new_parent.clone();
+    }
+    {
+        let list = siblings.entry(new_parent.clone()).or_default();
+        list.insert(index.min(list.len()), dragged.to_string());
+    }
+
+    // 深度优先展开成数组顺序（即展示顺序）。visited 同时兜住数据里的环：走不到
+    // 的行按原顺序追加到末尾，宁可顺序不完美也不能丢数据。
+    let mut final_ids: Vec<String> = Vec::with_capacity(items.len());
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = siblings.get(&None).cloned().unwrap_or_default();
+    stack.reverse();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id.clone()) || !items.contains_key(&id) {
+            continue;
+        }
+        final_ids.push(id.clone());
+        if let Some(children) = siblings.get(&Some(id.clone())) {
+            for child in children.iter().rev() {
+                stack.push(child.clone());
+            }
+        }
+    }
+    for id in &display {
+        if visited.insert(id.clone()) {
+            final_ids.push(id.clone());
+        }
+    }
+    let mut leftover: Vec<String> = items
+        .keys()
+        .filter(|id| !visited.contains(*id))
+        .cloned()
+        .collect();
+    leftover.sort();
+    final_ids.extend(leftover);
+
+    if new_parent.is_some() {
+        for id in &moving {
+            if let Some(item) = items.get_mut(id) {
+                item.cat_id = new_cat.clone();
+            }
+        }
+    }
+    for (i, id) in final_ids.iter().enumerate() {
+        if let Some(item) = items.get_mut(id) {
+            item.order = i as u32;
+        }
+    }
+
+    *todos = final_ids
+        .into_iter()
+        .filter_map(|id| items.remove(&id))
+        .collect();
+    Some(new_parent)
+}
+
+/// A transparent strip at a row's top/bottom edge that turns into a 2px
+/// insertion line while a matching drag hovers it. `blocked` lists the ids that
+/// cannot be dropped here (the row itself and its ancestors: inserting them at
+/// this boundary would nest a parent inside its own subtree).
+fn render_drop_band(
+    edge: BandEdge,
+    slot: DropSlot,
+    indent: f32,
+    blocked: Vec<String>,
+) -> AnyElement {
+    let band = div()
+        .absolute()
+        .left(px(indent))
+        .right(px(12.))
+        .h(px(8.))
+        .when(matches!(edge, BandEdge::Top), |el| el.top_0())
+        .when(matches!(edge, BandEdge::Bottom), |el| el.bottom_0())
+        .can_drop({
+            let blocked = blocked.clone();
+            move |value, _, _| {
+                value
+                    .downcast_ref::<TodoDrag>()
+                    .is_some_and(|drag| !blocked.iter().any(|id| id == &*drag.id))
+            }
+        })
+        .on_drop::<TodoDrag>({
+            let slot = slot.clone();
+            move |drag, _window, cx| {
+                if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                    let app = handle.0.clone();
+                    let id = drag.id.to_string();
+                    app.update(cx, |app, cx| app.drop_todo(&id, &slot, cx));
+                    cx.stop_propagation();
+                }
+            }
+        })
+        .drag_over::<TodoDrag>(move |style, _, _, cx| {
+            let color = cx.theme().drag_border;
+            match edge {
+                BandEdge::Top => style.border_t_2().border_color(color),
+                BandEdge::Bottom => style.border_b_2().border_color(color),
+            }
+        });
+    band.into_any_element()
+}
+
+/// Trailing slot after the last top-level row: "move to the end of the list".
+/// Needed because the bottom band of a nested row can only insert *inside* its
+/// parent, so a last-but-one child has nowhere to be dropped after.
+fn render_drop_tail() -> AnyElement {
+    div()
+        .ml(px(12.))
+        .mr(px(12.))
+        .h(px(14.))
+        .can_drop(|value, _, _| value.downcast_ref::<TodoDrag>().is_some())
+        .on_drop::<TodoDrag>(move |drag, _window, cx| {
+            if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+                let app = handle.0.clone();
+                let id = drag.id.to_string();
+                app.update(cx, |app, cx| app.drop_todo(&id, &DropSlot::RootEnd, cx));
+                cx.stop_propagation();
+            }
+        })
+        .drag_over::<TodoDrag>(|style, _, _, cx| {
+            style.border_t_2().border_color(cx.theme().drag_border)
+        })
+        .into_any_element()
 }
 
 /// Set a category from `root_id`'s perspective. 分类只归属顶层任务：root 是子任务
@@ -3261,6 +4034,158 @@ mod subtree_tests {
         assert_eq!(cat_of(&todos, "a"), None);
         assert_eq!(cat_of(&todos, "b"), None);
         assert_eq!(cat_of(&todos, "c"), None);
+    }
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    fn node(id: &str, parent: Option<&str>, cat: Option<&str>) -> TodoItem {
+        TodoItem {
+            id: id.to_string(),
+            content: id.into(),
+            completed: false,
+            created_at: "2026-10-29T10:00:00".into(),
+            completed_at: None,
+            order: 0,
+            tag_id: None,
+            cat_id: cat.map(|c| c.to_string()),
+            parent_id: parent.map(|p| p.to_string()),
+            remind_at: None,
+        }
+    }
+
+    fn ids(todos: &[TodoItem]) -> Vec<&str> {
+        todos.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    fn cat_of<'a>(todos: &'a [TodoItem], id: &str) -> Option<&'a str> {
+        todos
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap()
+            .cat_id
+            .as_deref()
+    }
+
+    /// Invariants the rebuilt list must always satisfy: no row lost or
+    /// duplicated, every parent listed before its children, and `order`
+    /// mirroring the array index.
+    fn assert_invariants(todos: &[TodoItem]) {
+        for (index, item) in todos.iter().enumerate() {
+            assert_eq!(
+                item.order, index as u32,
+                "order must follow the array index ({})",
+                item.id
+            );
+            if let Some(pid) = item.parent_id.as_deref() {
+                let parent_index = todos.iter().position(|t| t.id == pid);
+                assert!(parent_index.is_some(), "parent of {} must exist", item.id);
+                assert!(
+                    parent_index.unwrap() < index,
+                    "parent of {} must come first",
+                    item.id
+                );
+            }
+        }
+        let mut sorted: Vec<&str> = ids(todos);
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), todos.len(), "no row lost or duplicated");
+    }
+
+    #[test]
+    fn dropping_before_a_sibling_reorders_within_the_parent() {
+        let mut todos = vec![
+            node("p", None, None),
+            node("a", Some("p"), None),
+            node("b", Some("p"), None),
+            node("c", Some("p"), None),
+        ];
+        let parent = move_todo_in_list(&mut todos, "c", &DropSlot::Before("a".into()));
+        assert_eq!(parent, Some(Some("p".to_string())));
+        assert_eq!(ids(&todos), vec!["p", "c", "a", "b"]);
+        assert_invariants(&todos);
+    }
+
+    #[test]
+    fn dropping_below_a_parent_inserts_inside_it_as_the_first_child() {
+        let mut todos = vec![
+            node("p", None, None),
+            node("a", Some("p"), None),
+            node("q", None, None),
+        ];
+        // 父行有展开的子任务时，下边缘热区 = 插到父级内部第一位，而不是父级之后。
+        move_todo_in_list(&mut todos, "q", &DropSlot::FirstChild("p".into()));
+        assert_eq!(ids(&todos), vec!["p", "q", "a"]);
+        assert_invariants(&todos);
+    }
+
+    #[test]
+    fn dropping_on_a_title_appends_as_last_child_and_adopts_the_category() {
+        let mut todos = vec![
+            node("work", None, Some("cat-work")),
+            node("dep", Some("work"), Some("cat-work")),
+            node("home", None, Some("cat-home")),
+        ];
+        let parent = move_todo_in_list(&mut todos, "home", &DropSlot::LastChild("dep".into()));
+        assert_eq!(parent, Some(Some("dep".to_string())));
+        assert_eq!(ids(&todos), vec!["work", "dep", "home"]);
+        assert_eq!(cat_of(&todos, "home"), Some("cat-work"));
+        assert_invariants(&todos);
+    }
+
+    #[test]
+    fn dragging_a_parent_carries_its_whole_subtree() {
+        let mut todos = vec![
+            node("p", None, None),
+            node("c1", Some("p"), None),
+            node("c2", Some("c1"), None),
+            node("q", None, None),
+        ];
+        assert_eq!(collect_subtree(&todos, "p"), vec!["p", "c1", "c2"]);
+        move_todo_in_list(&mut todos, "p", &DropSlot::LastChild("q".into()));
+        assert_eq!(ids(&todos), vec!["q", "p", "c1", "c2"]);
+        assert_invariants(&todos);
+    }
+
+    #[test]
+    fn promoting_a_child_to_the_root_end_detaches_it() {
+        let mut todos = vec![
+            node("p", None, None),
+            node("c", Some("p"), None),
+            node("q", None, None),
+        ];
+        let parent = move_todo_in_list(&mut todos, "c", &DropSlot::RootEnd);
+        assert_eq!(parent, Some(None));
+        assert_eq!(ids(&todos), vec!["p", "q", "c"]);
+        assert!(todos.iter().find(|t| t.id == "c").unwrap().parent_id.is_none());
+        assert_invariants(&todos);
+    }
+
+    #[test]
+    fn a_parent_can_never_be_dropped_inside_its_own_subtree() {
+        let mut todos = vec![
+            node("p", None, None),
+            node("c", Some("p"), None),
+            node("g", Some("c"), None),
+        ];
+        let before: Vec<String> = ids(&todos).into_iter().map(String::from).collect();
+        assert!(move_todo_in_list(&mut todos, "p", &DropSlot::LastChild("g".into())).is_none());
+        assert!(move_todo_in_list(&mut todos, "c", &DropSlot::Before("g".into())).is_none());
+        let after: Vec<String> = ids(&todos).into_iter().map(String::from).collect();
+        assert_eq!(after, before, "invalid drops must not touch the list");
+    }
+
+    #[test]
+    fn ancestor_chain_and_subtree_are_cycle_safe() {
+        let mut todos = vec![node("a", None, None), node("b", Some("a"), None)];
+        // 人为制造一个环，确认两个遍历都还能退出。
+        todos[1].parent_id = Some("a".to_string());
+        todos[0].parent_id = Some("b".to_string());
+        assert_eq!(collect_subtree(&todos, "a").len(), 2);
+        assert_eq!(ancestor_ids(&todos, "a").len(), 2);
     }
 }
 

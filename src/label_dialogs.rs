@@ -9,8 +9,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::gpui::{
-    App, div, Context, Entity, Focusable, IntoElement, ParentElement, Render, RenderOnce, Styled,
-    Subscription, Window, px, ElementId, Hsla,
+    AnyElement, App, div, Context, Entity, Focusable, IntoElement, ParentElement, Render,
+    RenderOnce, Styled, Subscription, Window, px, ElementId, Hsla,
 };
 use crate::app::{DoitAppHandle, add_shortcut_matches, is_bare_enter};
 use crate::types::*;
@@ -152,6 +152,235 @@ impl RenderOnce for QuickColorPicker {
                     })
                     .content(move |_, window, cx| render_preset_dots(&dots_state, window, cx)),
             )
+    }
+}
+
+// ── Flat drag reordering (categories & tags) ───────────────────────────────
+
+/// 分类、标签都是扁平列表（没有子级），拖动整行可在列表内任意位置插入。
+/// 拖动负载只带行标识与展示信息；真正的顺序改在面板自己的 `local` 上。
+struct LabelDrag {
+    id: String,
+    name: String,
+    color: Hsla,
+}
+
+/// 拖动时跟随指针的浮层预览。
+struct LabelGhost {
+    name: String,
+    color: Hsla,
+}
+
+impl Render for LabelGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .max_w(px(240.))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_sm()
+            .text_color(cx.theme().popover_foreground)
+            .child(div().size(px(8.)).rounded_full().bg(self.color))
+            .child(div().min_w_0().truncate().child(self.name.clone()))
+    }
+}
+
+/// 拖动落点。扁平列表只有「插到某行前面 / 后面」两种，不存在成为子级。
+#[derive(Clone)]
+enum LabelSlot {
+    Before(String),
+    After(String),
+}
+
+fn label_slot_id(slot: &LabelSlot) -> &str {
+    match slot {
+        LabelSlot::Before(id) | LabelSlot::After(id) => id,
+    }
+}
+
+/// 行上 / 下边缘的插入位置细条。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LabelBandEdge {
+    Top,
+    Bottom,
+}
+
+/// 分类 / 标签面板各自维护一份 `local` 顺序：落点直接改它，再推回 app。
+trait LabelReorder: Sized + 'static {
+    fn move_label(&mut self, dragged: &str, slot: &LabelSlot, cx: &mut Context<Self>);
+}
+
+/// 把 `dragged` 挪到 `slot` 指定的位置；`id_of` 取每项 id。返回是否真的移动。
+fn move_label_in_list<T>(
+    list: &mut Vec<T>,
+    dragged: &str,
+    slot: &LabelSlot,
+    id_of: impl Fn(&T) -> String,
+) -> bool {
+    // 拖到自己身上没有任何意义（也避免移除后找不到落点被塞到队首）。
+    if label_slot_id(slot) == dragged {
+        return false;
+    }
+    let Some(from) = list.iter().position(|it| id_of(it) == dragged) else {
+        return false;
+    };
+    let item = list.remove(from);
+    let to = match slot {
+        LabelSlot::Before(id) => list.iter().position(|it| id_of(it) == id.as_str()),
+        LabelSlot::After(id) => list
+            .iter()
+            .position(|it| id_of(it) == id.as_str())
+            .map(|ix| ix + 1),
+    };
+    let Some(to) = to else {
+        // 落点行已经不在了（理论上不该发生）：原样放回，避免顺序错乱。
+        list.insert(from.min(list.len()), item);
+        return false;
+    };
+    list.insert(to.min(list.len()), item);
+    true
+}
+
+#[cfg(test)]
+mod label_reorder_tests {
+    use super::*;
+
+    fn ids(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn order(list: &[String]) -> Vec<&str> {
+        list.iter().map(|s| s.as_str()).collect()
+    }
+
+    #[test]
+    fn before_slot_moves_item_up() {
+        let mut list = ids(&["a", "b", "c", "d"]);
+        assert!(move_label_in_list(
+            &mut list,
+            "d",
+            &LabelSlot::Before("b".into()),
+            |s: &String| s.clone()
+        ));
+        assert_eq!(order(&list), vec!["a", "d", "b", "c"]);
+    }
+
+    #[test]
+    fn after_slot_moves_item_down() {
+        let mut list = ids(&["a", "b", "c", "d"]);
+        assert!(move_label_in_list(
+            &mut list,
+            "a",
+            &LabelSlot::After("c".into()),
+            |s: &String| s.clone()
+        ));
+        assert_eq!(order(&list), vec!["b", "c", "a", "d"]);
+    }
+
+    #[test]
+    fn after_last_item_appends_at_end() {
+        let mut list = ids(&["a", "b", "c"]);
+        assert!(move_label_in_list(
+            &mut list,
+            "a",
+            &LabelSlot::After("c".into()),
+            |s: &String| s.clone()
+        ));
+        assert_eq!(order(&list), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn dropping_onto_itself_is_a_noop() {
+        let mut list = ids(&["a", "b", "c"]);
+        assert!(!move_label_in_list(
+            &mut list,
+            "b",
+            &LabelSlot::Before("b".into()),
+            |s: &String| s.clone()
+        ));
+        assert!(!move_label_in_list(
+            &mut list,
+            "b",
+            &LabelSlot::After("b".into()),
+            |s: &String| s.clone()
+        ));
+        assert_eq!(order(&list), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn missing_target_keeps_order() {
+        let mut list = ids(&["a", "b", "c"]);
+        assert!(!move_label_in_list(
+            &mut list,
+            "a",
+            &LabelSlot::Before("zzz".into()),
+            |s: &String| s.clone()
+        ));
+        assert_eq!(order(&list), vec!["a", "b", "c"]);
+    }
+}
+
+/// 一行上的一道插入位置细条：只有拖动进行中、且拖的不是本行时才接受落下。
+fn render_label_band<P: LabelReorder>(
+    panel: Entity<P>,
+    edge: LabelBandEdge,
+    slot: LabelSlot,
+) -> AnyElement {
+    let band = div()
+        .absolute()
+        .left(px(8.))
+        .right(px(8.))
+        .h(px(8.))
+        .when(edge == LabelBandEdge::Top, |el| el.top_0())
+        .when(edge == LabelBandEdge::Bottom, |el| el.bottom_0())
+        .can_drop({
+            let target_id = label_slot_id(&slot).to_string();
+            move |value, _, _| {
+                value
+                    .downcast_ref::<LabelDrag>()
+                    .is_some_and(|drag| drag.id != target_id)
+            }
+        })
+        .on_drop::<LabelDrag>({
+            let slot = slot.clone();
+            move |drag, _window, cx| {
+                let dragged = drag.id.clone();
+                let slot = slot.clone();
+                panel.update(cx, |p, cx| p.move_label(&dragged, &slot, cx));
+                cx.stop_propagation();
+            }
+        })
+        .drag_over::<LabelDrag>(move |style, _, _, cx| {
+            let color = cx.theme().drag_border;
+            match edge {
+                LabelBandEdge::Top => style.border_t_2().border_color(color),
+                LabelBandEdge::Bottom => style.border_b_2().border_color(color),
+            }
+        });
+    band.into_any_element()
+}
+
+impl LabelReorder for CategoriesPanel {
+    fn move_label(&mut self, dragged: &str, slot: &LabelSlot, cx: &mut Context<Self>) {
+        if move_label_in_list(&mut self.local, dragged, slot, |c| c.id.clone()) {
+            self.push(cx);
+            cx.notify();
+        }
+    }
+}
+
+impl LabelReorder for TagsPanel {
+    fn move_label(&mut self, dragged: &str, slot: &LabelSlot, cx: &mut Context<Self>) {
+        if move_label_in_list(&mut self.local, dragged, slot, |t| t.id.clone()) {
+            self.push(cx);
+            cx.notify();
+        }
     }
 }
 
@@ -374,7 +603,7 @@ impl Render for CategoriesPanel {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("点「编辑」修改名称与颜色，勾选默认分类。"),
+                    .child("点「编辑」修改名称与颜色，勾选默认分类；拖动行可以调整顺序。"),
             )
             .child(
                 div()
@@ -398,6 +627,7 @@ impl Render for CategoriesPanel {
                         let is_hovered = self.hover_row.as_deref() == Some(&*id);
                         let hover_entity = cx.entity();
                         let hover_id = id.clone();
+                        let drag_color = color_from_hex(&cat.color);
                         let mut row = div()
                             .id(ElementId::Name(format!("cat-row-{id}").into()))
                             .flex()
@@ -406,6 +636,7 @@ impl Render for CategoriesPanel {
                             .px(px(8.))
                             .py(px(6.))
                             .rounded_lg()
+                            .relative()
                             .hover(|s| s.bg(cx.theme().muted))
                             .on_hover(move |entered, _, cx| {
                                 let hover_id = hover_id.clone();
@@ -416,6 +647,23 @@ impl Render for CategoriesPanel {
                                         cx.notify();
                                     }
                                 });
+                            })
+                            // 拖拽源：整行可拖（编辑态除外，否则会抢走输入框里的
+                            // 选字手势）。拖动超过 gpui 的 2px 阈值才成立。
+                            .when(!editing, |el| {
+                                el.cursor_grab().on_drag(
+                                    LabelDrag {
+                                        id: id.clone(),
+                                        name: name.to_string(),
+                                        color: drag_color,
+                                    },
+                                    move |drag, _offset, _window, cx| {
+                                        cx.new(|_| LabelGhost {
+                                            name: drag.name.clone(),
+                                            color: drag.color,
+                                        })
+                                    },
+                                )
                             });
 
                         if editing {
@@ -598,6 +846,18 @@ impl Render for CategoriesPanel {
                                 });
                         }
 
+                        // 行上 / 下边缘的插入位置（扁平列表，不做子级嵌套）。
+                        row = row
+                            .child(render_label_band(
+                                entity.clone(),
+                                LabelBandEdge::Top,
+                                LabelSlot::Before(id.clone()),
+                            ))
+                            .child(render_label_band(
+                                entity.clone(),
+                                LabelBandEdge::Bottom,
+                                LabelSlot::After(id.clone()),
+                            ));
                         row.into_any_element()
                     }))
                     .into_any_element(),
@@ -870,7 +1130,7 @@ impl Render for TagsPanel {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("点「编辑」修改名称与颜色。"),
+                    .child("点「编辑」修改名称与颜色；拖动行可以调整顺序。"),
             )
             .child(
                 div()
@@ -892,6 +1152,7 @@ impl Render for TagsPanel {
                         let is_hovered = self.hover_row.as_deref() == Some(&*id);
                         let hover_entity = cx.entity();
                         let hover_id = id.clone();
+                        let drag_color = color_from_hex(&tag.color);
                         let mut row = div()
                             .id(ElementId::Name(format!("tag-row-{id}").into()))
                             .flex()
@@ -900,6 +1161,7 @@ impl Render for TagsPanel {
                             .px(px(8.))
                             .py(px(6.))
                             .rounded_lg()
+                            .relative()
                             .hover(|s| s.bg(cx.theme().muted))
                             .on_hover(move |entered, _, cx| {
                                 let hover_id = hover_id.clone();
@@ -910,6 +1172,22 @@ impl Render for TagsPanel {
                                         cx.notify();
                                     }
                                 });
+                            })
+                            // 拖拽源：整行可拖（编辑态除外）。
+                            .when(!editing, |el| {
+                                el.cursor_grab().on_drag(
+                                    LabelDrag {
+                                        id: id.clone(),
+                                        name: name.to_string(),
+                                        color: drag_color,
+                                    },
+                                    move |drag, _offset, _window, cx| {
+                                        cx.new(|_| LabelGhost {
+                                            name: drag.name.clone(),
+                                            color: drag.color,
+                                        })
+                                    },
+                                )
                             });
 
                         if editing {
@@ -1058,6 +1336,18 @@ impl Render for TagsPanel {
                                 });
                         }
 
+                        // 行上 / 下边缘的插入位置（扁平列表，不做子级嵌套）。
+                        row = row
+                            .child(render_label_band(
+                                entity.clone(),
+                                LabelBandEdge::Top,
+                                LabelSlot::Before(id.clone()),
+                            ))
+                            .child(render_label_band(
+                                entity.clone(),
+                                LabelBandEdge::Bottom,
+                                LabelSlot::After(id.clone()),
+                            ));
                         row.into_any_element()
                     }))
                     .into_any_element(),
