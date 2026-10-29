@@ -45,6 +45,10 @@ cargo release                 # 已配好 PATH 链接，直接在仓库根执行
 ln -sfn "$(pwd)/scripts/release.sh" ~/.cargo/bin/cargo-release
 ```
 
+> 这个链接不在仓库里，重装/升级 Rust（rustup）或迁移 HOME 后可能丢失，表现为
+> `error: no such command: release`。重新执行上面的 `ln -sfn` 即可恢复；也可以直接用
+> `./scripts/release.sh`，它不依赖这个链接。
+
 示例：
 
 ```bash
