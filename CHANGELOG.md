@@ -1,5 +1,26 @@
 # Changelog
 
+## [v0.1.14] - 2026-10-29
+
+### 新增
+
+- feat: 为分类和标签添加拖拽排序功能
+
+### 修复
+
+- fix: 修复快捷键逻辑，配置后普通回车不再误触关闭弹窗
+
+### 优化
+
+- refactor(app): 重写时间轴布局实现更清晰的视觉结构
+- refactor: 重构主题切换逻辑并更新图表配色系统
+
+### 文档
+
+- docs: add note about cargo-release symlink loss and recovery
+
+
+
 ## [v0.1.13] - 2026-10-21
 
 ### 修复
