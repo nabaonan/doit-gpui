@@ -17,7 +17,6 @@ use gpui_kit::component::select::{
     SearchableVec, Select, SelectEvent, SelectItem, SelectState,
 };
 use gpui_kit::component::chart::{BarChart, LineChart, PieChart};
-use gpui_kit::component::marker::Marker;
 use gpui_kit::base::animation::{EffectTransition, ease_out_cubic};
 use gpui_kit::base::{Progress, ProgressIndicator, ProgressTrack};
 use gpui_kit::component::tooltip::Tooltip;
@@ -2414,14 +2413,114 @@ impl DoitApp {
 impl DoitApp {
     fn render_timeline(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.completed_by_day();
+        let is_empty = groups.is_empty();
         let muted = cx.theme().muted_foreground;
+        let accent = cx.theme().chart_1;
+        let rail_color = cx.theme().border;
+        let background = cx.theme().background;
+
+        // Left rail layout: a narrow date column, then a 16px rail column that
+        // carries one ring per day, then the events. Rows stay contiguous (all
+        // spacing lives inside a row) and every text line is a fixed 20px box, so
+        // the ring lands on the day's first event line and the per-row segments
+        // join into one continuous line.
+        const DATE_W: f32 = 58.;
+        const RAIL_W: f32 = 16.;
+        const TEXT_H: f32 = 20.;
+        const RING: f32 = 10.;
+        // Rail column centre, minus half a pixel so a 1px line reads crisp.
+        const RAIL_X: f32 = DATE_W + RAIL_W / 2. - 0.5;
+        // Ring centre in the first group, and the last event's text bottom.
+        const RAIL_TOP_TRIM: f32 = 13.;
+        const RAIL_BOTTOM_TRIM: f32 = 3.;
+
+        let mut day_groups: Vec<AnyElement> = Vec::new();
+        for (index, (day, items)) in groups.into_iter().enumerate() {
+            let gap_top = if index == 0 { px(0.) } else { px(10.) };
+            day_groups.push(
+                div()
+                    .h_flex()
+                    .items_start()
+                    .pt(gap_top)
+                    .child(
+                        div()
+                            .w(px(DATE_W))
+                            .flex_none()
+                            .pt(px(3.))
+                            .v_flex()
+                            .items_end()
+                            .child(
+                                div()
+                                    .h(px(TEXT_H))
+                                    .text_sm()
+                                    .font_bold()
+                                    .child(month_day(&day)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(weekday_cn(&day)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(RAIL_W))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .pt(px(8.))
+                            .child(
+                                div()
+                                    .size(px(RING))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(accent)
+                                    // Opaque centre so the rail stops at the ring
+                                    // instead of running through its hole.
+                                    .bg(background),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .children(items.into_iter().map(|item| {
+                                div()
+                                    .h_flex()
+                                    .py(px(3.))
+                                    .child(
+                                        div()
+                                            .h(px(TEXT_H))
+                                            .w(px(44.))
+                                            .flex_none()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(format_time(&item.completed_at)),
+                                    )
+                                    .child(
+                                        div()
+                                            .h(px(TEXT_H))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .child(item.content.clone()),
+                                    )
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
 
         div()
             .v_flex()
             .gap_4()
             .p_6()
             .child(div().text_lg().font_bold().child("时间轴"))
-            .when(groups.is_empty(), |el| {
+            .when(is_empty, |el| {
                 el.child(
                     div()
                         .py_10()
@@ -2429,70 +2528,22 @@ impl DoitApp {
                         .child("还没有完成记录，完成一条待办点亮你的时间轴"),
                 )
             })
-            .children(groups.into_iter().map(|(day, items)| {
-                // Each day is a Marker row (date + completion count); the
-                // completed items follow indented. Category is a filter at the
-                // top, not shown on the timeline.
-                div()
-                    .v_flex()
-                    .gap_2()
-                    .child(
-                        Marker::new()
-                            .id(ElementId::Name(format!("tl-{}", &day).into()))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_bold()
-                                            .child(format!(
-                                                "{} · {}",
-                                                month_day(&day),
-                                                weekday_cn(&day)
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(format!("完成 {} 个待办", items.len())),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pl_4()
-                            .v_flex()
-                            .gap_1()
-                            .children(items.into_iter().map(|item| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .py(px(4.))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .w(px(44.))
-                                            .child(format_time(&item.completed_at)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .line_through()
-                                            .text_color(muted)
-                                            .child(item.content.clone()),
-                                    )
-                                    .into_any_element()
-                            })),
-                    )
-                    .into_any_element()
-            }))
+            .when(!is_empty, |el| {
+                el.child(
+                    div()
+                        .relative()
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(RAIL_X))
+                                .top(px(RAIL_TOP_TRIM))
+                                .bottom(px(RAIL_BOTTOM_TRIM))
+                                .w(px(1.))
+                                .bg(rail_color),
+                        )
+                        .child(div().v_flex().children(day_groups)),
+                )
+            })
     }
 }
 
