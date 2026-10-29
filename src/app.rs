@@ -1165,8 +1165,9 @@ impl DoitApp {
             .capture_key_down({
                 move |event, window, cx| {
                     let ks = &event.keystroke;
-                    // A bare Enter always submits; otherwise the configured
-                    // shortcut (e.g. Cmd+N) submits too.
+                    // Only the configured add shortcut submits (the default
+                    // config is a bare Enter); any other keystroke is left to
+                    // the input.
                     if !add_shortcut_matches(ks, &shortcut) {
                         return;
                     }
@@ -2650,24 +2651,111 @@ fn stats_legend(color: Hsla, label: &str, value: usize, _cx: &gpui_kit::gpui::Ap
         )
 }
 
-/// True when a keystroke should confirm an "add": a bare Enter, or the
-/// user-configured add shortcut (which defaults to Enter) from settings.
+/// True when a keystroke is exactly the user-configured add shortcut.
 /// Shared by the todo input and the category/tag add inputs.
+///
+/// There is deliberately no implicit bare-Enter fallback: once the user sets
+/// e.g. `Ctrl+Enter`, a plain Enter must not confirm an add. The default
+/// configuration is a bare Enter, so out-of-the-box behavior is unchanged.
 pub(crate) fn add_shortcut_matches(
     ks: &gpui_kit::gpui::Keystroke,
     sc: &ShortcutConfig,
 ) -> bool {
-    let bare_enter = ks.key.eq_ignore_ascii_case("enter")
+    ks.key.eq_ignore_ascii_case(sc.key.as_ref())
+        && ks.modifiers.control == sc.ctrl
+        && ks.modifiers.shift == sc.shift
+        && ks.modifiers.alt == sc.alt
+        && ks.modifiers.platform == sc.meta
+}
+
+/// True for a bare Enter with no modifiers — the keystroke dialog surfaces bind
+/// to `Confirm`. An add-input whose configured shortcut is something else must
+/// swallow this, otherwise pressing Enter after typing a new label would close
+/// the whole settings dialog instead of doing nothing.
+pub(crate) fn is_bare_enter(ks: &gpui_kit::gpui::Keystroke) -> bool {
+    ks.key.eq_ignore_ascii_case("enter")
         && !ks.modifiers.control
         && !ks.modifiers.shift
         && !ks.modifiers.alt
-        && !ks.modifiers.platform;
-    bare_enter
-        || (ks.key.eq_ignore_ascii_case(sc.key.as_ref())
-            && ks.modifiers.control == sc.ctrl
-            && ks.modifiers.shift == sc.shift
-            && ks.modifiers.alt == sc.alt
-            && ks.modifiers.platform == sc.meta)
+        && !ks.modifiers.platform
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::{add_shortcut_matches, is_bare_enter};
+    use crate::types::ShortcutConfig;
+    use gpui_kit::gpui::{Keystroke, Modifiers};
+
+    fn keystroke(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers {
+                control: ctrl,
+                shift,
+                alt,
+                platform: meta,
+                function: false,
+            },
+            key: key.to_string(),
+            key_char: None,
+        }
+    }
+
+    fn shortcut(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> ShortcutConfig {
+        ShortcutConfig {
+            key: key.into(),
+            ctrl,
+            shift,
+            alt,
+            meta,
+        }
+    }
+
+    #[test]
+    fn default_shortcut_is_a_bare_enter() {
+        let sc = shortcut("Enter", false, false, false, false);
+        assert!(add_shortcut_matches(
+            &keystroke("enter", false, false, false, false),
+            &sc
+        ));
+    }
+
+    #[test]
+    fn configured_combo_does_not_also_accept_bare_enter() {
+        let sc = shortcut("enter", true, false, false, false);
+        assert!(add_shortcut_matches(
+            &keystroke("enter", true, false, false, false),
+            &sc
+        ));
+        assert!(
+            !add_shortcut_matches(&keystroke("enter", false, false, false, false), &sc),
+            "plain Enter must not add when the user configured Ctrl+Enter"
+        );
+    }
+
+    #[test]
+    fn extra_or_missing_modifiers_do_not_match() {
+        let sc = shortcut("enter", true, false, false, false);
+        assert!(!add_shortcut_matches(
+            &keystroke("enter", true, true, false, false),
+            &sc
+        ));
+        assert!(!add_shortcut_matches(
+            &keystroke("enter", true, false, false, true),
+            &sc
+        ));
+        assert!(!add_shortcut_matches(
+            &keystroke("k", true, false, false, false),
+            &sc
+        ));
+    }
+
+    #[test]
+    fn bare_enter_predicate_ignores_modified_enters() {
+        assert!(is_bare_enter(&keystroke("enter", false, false, false, false)));
+        assert!(!is_bare_enter(&keystroke("enter", true, false, false, false)));
+        assert!(!is_bare_enter(&keystroke("enter", false, true, false, false)));
+        assert!(!is_bare_enter(&keystroke("k", false, false, false, false)));
+    }
 }
 
 fn color_dot(color: &str, _cx: &gpui_kit::gpui::App) -> impl IntoElement {

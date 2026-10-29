@@ -12,7 +12,7 @@ use gpui_kit::gpui::{
     App, div, Context, Entity, Focusable, IntoElement, ParentElement, Render, RenderOnce, Styled,
     Subscription, Window, px, ElementId, Hsla,
 };
-use crate::app::{DoitAppHandle, add_shortcut_matches};
+use crate::app::{DoitAppHandle, add_shortcut_matches, is_bare_enter};
 use crate::types::*;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -230,10 +230,11 @@ impl CategoriesPanel {
                 cx.notify();
             },
         ));
-        // Pressing Enter (or the configured add shortcut) while the new-label
-        // input is focused adds the entry instead of closing the containing
-        // dialog. The dialog binds `enter -> Confirm` (close), so we intercept
-        // the keystroke before that binding and consume it after adding.
+        // The configured add shortcut adds the entry instead of closing the
+        // containing dialog (which binds `enter -> Confirm`). We intercept the
+        // keystroke before that binding and consume it after adding. A bare
+        // Enter is swallowed too when it is not the configured shortcut, so
+        // typing a name and pressing Enter never closes the dialog by accident.
         let panel = cx.entity();
         let new_name_handle = new_name.clone();
         subs.push(cx.intercept_keystrokes(move |event, window, cx| {
@@ -247,14 +248,15 @@ impl CategoriesPanel {
                     alt: false,
                     meta: false,
                 });
-            if !add_shortcut_matches(&event.keystroke, &shortcut) {
-                return;
-            }
             if !new_name_handle.read(cx).focus_handle(cx).is_focused(window) {
                 return;
             }
-            panel.update(cx, |p, cx| p.add_new(window, cx));
-            cx.stop_propagation();
+            if add_shortcut_matches(&event.keystroke, &shortcut) {
+                panel.update(cx, |p, cx| p.add_new(window, cx));
+                cx.stop_propagation();
+            } else if is_bare_enter(&event.keystroke) {
+                cx.stop_propagation();
+            }
         }));
 
         Self {
@@ -726,10 +728,11 @@ impl TagsPanel {
                 cx.notify();
             },
         ));
-        // Pressing Enter (or the configured add shortcut) while the new-label
-        // input is focused adds the entry instead of closing the containing
-        // dialog. The dialog binds `enter -> Confirm` (close), so we intercept
-        // the keystroke before that binding and consume it after adding.
+        // The configured add shortcut adds the entry instead of closing the
+        // containing dialog (which binds `enter -> Confirm`). We intercept the
+        // keystroke before that binding and consume it after adding. A bare
+        // Enter is swallowed too when it is not the configured shortcut, so
+        // typing a name and pressing Enter never closes the dialog by accident.
         let panel = cx.entity();
         let new_name_handle = new_name.clone();
         subs.push(cx.intercept_keystrokes(move |event, window, cx| {
@@ -743,14 +746,15 @@ impl TagsPanel {
                     alt: false,
                     meta: false,
                 });
-            if !add_shortcut_matches(&event.keystroke, &shortcut) {
-                return;
-            }
             if !new_name_handle.read(cx).focus_handle(cx).is_focused(window) {
                 return;
             }
-            panel.update(cx, |p, cx| p.add_new(window, cx));
-            cx.stop_propagation();
+            if add_shortcut_matches(&event.keystroke, &shortcut) {
+                panel.update(cx, |p, cx| p.add_new(window, cx));
+                cx.stop_propagation();
+            } else if is_bare_enter(&event.keystroke) {
+                cx.stop_propagation();
+            }
         }));
 
         Self {

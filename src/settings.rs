@@ -472,7 +472,7 @@ impl SettingsPanel {
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(
-                                        "该快捷键用于在输入框中确认新增（待办、分类、标签），默认直接按 Enter 即可。",
+                                        "该快捷键用于在输入框中确认新增（待办、分类、标签）。只有按下这里的组合键才会添加，默认是 Enter。",
                                     ),
                             );
                         div().v_flex().gap_2().child(shortcut_row)
