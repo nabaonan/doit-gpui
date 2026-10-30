@@ -1441,16 +1441,22 @@ fn start_update_download(
                         set_update_download(app_cx, None);
                         match result {
                             Ok(path) => {
+                                // Open the downloaded package right away so the
+                                // user does not have to find it in Finder. The
+                                // installer itself is still only run after Doit
+                                // quits.
+                                let opened = open_downloaded_package(&path);
                                 entity.update(app_cx, |p, cx| {
-                                    p.update_state = TransferState::Ok(format!(
-                                        "{version} 已下载完成，请退出 Doit 后安装。"
-                                    ));
+                                    p.update_state = TransferState::Ok(if opened {
+                                        format!("{version} 已下载完成，安装包已打开。")
+                                    } else {
+                                        format!("{version} 已下载完成。")
+                                    });
                                     cx.notify();
                                 });
-                                // The installer must not be launched while the
-                                // old version is still running: tell the user
-                                // where it is and let them install after quit.
-                                show_download_complete_dialog(window, app_cx, &path);
+                                show_download_complete_dialog(
+                                    window, app_cx, &path, opened,
+                                );
                             }
                             Err(err) => {
                                 entity.update(app_cx, |p, cx| {
@@ -1554,11 +1560,12 @@ fn part_path(dest: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(part)
 }
 
-/// Completion prompt: the package is ready, install it after quitting.
+/// Completion prompt: the package is already open; install it after quitting.
 fn show_download_complete_dialog(
     window: &mut Window,
     cx: &mut App,
     path: &std::path::Path,
+    opened: bool,
 ) {
     let file = path
         .file_name()
@@ -1572,12 +1579,17 @@ fn show_download_complete_dialog(
         "打开所在文件夹"
     };
     let install_hint = if cfg!(target_os = "macos") {
-        "请退出 Doit 后，打开安装包并把 Doit 拖入「应用程序」完成安装。"
+        "请退出 Doit 后，把安装包里的 Doit 拖入「应用程序」完成安装。"
     } else {
-        "请退出 Doit 后，运行安装包完成安装。"
+        "请退出 Doit 后，解压安装包并替换旧版本。"
+    };
+    let open_hint = if opened {
+        "安装包已自动打开。"
+    } else {
+        "安装包已保存，但自动打开失败，请手动打开。"
     };
     window.open_alert_dialog(cx, move |alert, _w, _c| {
-        alert
+        let mut alert = alert
             .title("更新下载完成")
             .description(
                 div()
@@ -1585,20 +1597,64 @@ fn show_download_complete_dialog(
                     .gap_2()
                     .child(format!("{file} 已保存到："))
                     .child(display.clone())
+                    .child(open_hint)
                     .child(install_hint),
             )
-            .ok_text(reveal)
-            .cancel_text("稍后")
-            .show_cancel(true)
-            .on_ok({
-                let path = path.clone();
-                move |_, _, _| {
-                    reveal_in_file_manager(&path);
-                    true
-                }
-            })
-            .on_cancel(|_, _, _| true)
+            .ok_text("知道了")
+            .on_ok(|_, _, _| true);
+        if !opened {
+            alert = alert
+                .cancel_text(reveal)
+                .show_cancel(true)
+                .on_cancel({
+                    let path = path.clone();
+                    move |_, _, _| {
+                        reveal_in_file_manager(&path);
+                        true
+                    }
+                });
+        }
+        alert
     });
+}
+
+/// Open the downloaded package with the platform's default handler (on macOS
+/// this mounts the DMG and shows the install window). The child is reaped on a
+/// helper thread so the UI loop never blocks on the launcher.
+fn open_downloaded_package(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(path);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    spawn_detached(command)
+}
+
+/// Spawn a launcher and reap it on a helper thread so the UI loop never blocks.
+fn spawn_detached(mut command: std::process::Command) -> bool {
+    match command.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Show the downloaded package in the platform file manager.
