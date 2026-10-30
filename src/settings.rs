@@ -15,6 +15,7 @@ use gpui_kit::component::{
     setting::{SettingGroup, SettingItem, SettingPage, Settings},
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
+    text::TextView,
 };
 use gpui_kit::prelude::*;
 use futures::AsyncReadExt;
@@ -48,8 +49,6 @@ pub struct SettingsPanel {
     recording_handle: FocusHandle,
     sync_test: TransferState,
     update_state: TransferState,
-    /// In-app update download progress (frac 0..1); None when idle.
-    download: Option<DownloadState>,
     categories_panel: Entity<CategoriesPanel>,
     tags_panel: Entity<TagsPanel>,
 
@@ -145,7 +144,6 @@ impl SettingsPanel {
             recording_handle: cx.focus_handle(),
             sync_test: TransferState::Idle,
             update_state: TransferState::Idle,
-            download: None,
             categories_panel,
             tags_panel,
             _subs: subs,
@@ -1109,6 +1107,10 @@ impl SettingsPanel {
                     .title("Doit")
                     .item(SettingItem::render(move |_, _window, cx| {
                         let update_state = about_entity.read(cx).update_state.clone();
+                        let downloading = cx
+                            .try_global::<DoitAppHandle>()
+                            .map(|h| h.0.read(cx).update_download.is_some())
+                            .unwrap_or(false);
                         let entity = about_entity.clone();
                         div()
                             .v_flex()
@@ -1142,16 +1144,17 @@ impl SettingsPanel {
                                         Button::new("check-update")
                                             .small()
                                             .outline()
-                                            .label(match update_state {
+                                            .label(match &update_state {
                                                 TransferState::Busy => {
                                                     "检查中…".to_string()
                                                 }
+                                                _ if downloading => "下载中…".to_string(),
                                                 _ => "检查更新".to_string(),
                                             })
-                                            .disabled(matches!(
-                                                update_state,
-                                                TransferState::Busy
-                                            ))
+                                            .disabled(
+                                                matches!(update_state, TransferState::Busy)
+                                                    || downloading,
+                                            )
                                             .on_click({
                                                 let entity = entity.clone();
                                                 move |_, window, cx| {
@@ -1170,7 +1173,8 @@ impl SettingsPanel {
                                     .child(update_state_text(&update_state, cx)),
                             )
                             .when_some(
-                                about_entity.read(cx).download.clone(),
+                                cx.try_global::<DoitAppHandle>()
+                                    .and_then(|h| h.0.read(cx).update_download.clone()),
                                 |el, dl| {
                                     el.child(
                                         div()
@@ -1185,11 +1189,7 @@ impl SettingsPanel {
                                                     .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
                                                     .child(format!("正在下载 {}", dl.file))
-                                                    .child(if dl.done {
-                                                        "下载完成，正在打开安装包…".to_string()
-                                                    } else {
-                                                        format!("{:.0}%", dl.frac * 100.0)
-                                                    }),
+                                                    .child(format!("{:.0}%", dl.frac * 100.0)),
                                             )
                                             .child(
                                                 Progress::new("update-download-progress")
@@ -1235,53 +1235,103 @@ fn run_update_check(
                         let tag_v = rel.tag.trim_start_matches(['v', 'V']);
                         if cmp_version(tag_v, &current) == Ordering::Greater {
                             let arch = current_asset_key();
-                            let title = format!("发现新版本 {}", rel.tag);
-                            let mut desc = format!("当前版本 v{current}（{}）。", arch);
-                            if let Some(name) = rel.asset_name.as_deref() {
-                                desc.push_str(&format!("将下载安装包：{name}。"));
-                            }
-                            let notes = shorten(&rel.notes, 220);
-                            desc.push_str(&notes);
-                            if rel.notes.chars().count() > 220 {
-                                desc.push('…');
-                            }
-                            // Download the arch-specific asset when one exists,
-                            // otherwise fall back to the release page.
-                            let download_url =
-                                rel.asset_url.clone().unwrap_or_else(|| rel.page_url.clone());
+                            let tag = rel.tag.clone();
+                            let title = format!("发现新版本 {tag}");
+                            let meta = format!(
+                                "当前版本 v{current}（{arch}）  →  新版本 {tag}"
+                            );
                             let asset_name = rel.asset_name.clone();
-                            let ok_label =
-                                if rel.asset_url.is_some() { "前往下载" } else { "前往发布页" };
+                            let asset_line = asset_name
+                                .as_ref()
+                                .map(|name| format!("安装包：{name}"))
+                                .unwrap_or_else(|| {
+                                    "当前平台暂未提供安装包，无法在应用内下载。".to_string()
+                                });
+                            let notes = rel.notes.trim().to_string();
+                            let notes_id = format!("release-notes-{tag}");
+                            let download_url = rel.asset_url.clone();
                             let entity_for_dl = entity.clone();
-                            window.open_alert_dialog(app_cx, move |alert, _w, _c| {
-                                let url = download_url.clone();
-                                let has_asset = asset_name.is_some();
-                                let asset_file = asset_name.clone().unwrap_or_default();
-                                let entity_for_ok = entity_for_dl.clone();
-                                alert
+                            window.open_dialog(app_cx, move |dialog, _window, cx| {
+                                let notes = if notes.is_empty() {
+                                    "暂无更新说明。".to_string()
+                                } else {
+                                    notes.clone()
+                                };
+                                let mut dialog = dialog
                                     .title(title.clone())
-                                    .description(desc.clone())
-                                    .ok_text(ok_label)
-                                    .cancel_text("暂不")
-                                    .show_cancel(true)
-                                    .on_ok(move |_, window, cx| {
-                                        if has_asset {
-                                            // 有安装包：直接在当前应用内下载（about 页显示
-                                            // 进度条），下载完成后自动用系统默认方式打开安装包。
-                                            start_update_download(
-                                                entity_for_ok.clone(),
-                                                &url,
-                                                &asset_file,
-                                                window,
-                                                cx,
-                                            );
-                                        } else {
-                                            // 没有可下载的安装包：打开 GitHub 发布页。
-                                            cx.open_url(&url);
-                                        }
-                                        true
-                                    })
-                                    .on_cancel(|_, _, _| true)
+                                    .w(px(600.))
+                                    .child(
+                                        div()
+                                            .v_flex()
+                                            .gap_3()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(meta.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(asset_line.clone()),
+                                            )
+                                            // Release notes are Markdown on GitHub; render
+                                            // them instead of showing the raw source.
+                                            .child(TextView::markdown(
+                                                notes_id.clone(),
+                                                notes,
+                                            )),
+                                    );
+                                let can_download =
+                                    download_url.is_some() && asset_name.is_some();
+                                let mut footer = div()
+                                    .flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("update-later")
+                                            .outline()
+                                            .label("暂不")
+                                            .on_click(|_, window, cx| {
+                                                window.close_dialog(cx);
+                                            }),
+                                    );
+                                if can_download {
+                                    let url = download_url.clone().unwrap_or_default();
+                                    let file = asset_name.clone().unwrap_or_default();
+                                    let version = tag.clone();
+                                    let entity = entity_for_dl.clone();
+                                    footer = footer.child(
+                                        Button::new("update-download-now")
+                                            .primary()
+                                            .label("立即下载")
+                                            .on_click(move |_, window, cx| {
+                                                window.close_dialog(cx);
+                                                start_update_download(
+                                                    entity.clone(),
+                                                    &url,
+                                                    &file,
+                                                    &version,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                    );
+                                } else {
+                                    footer = footer.child(
+                                        Button::new("update-ok")
+                                            .primary()
+                                            .label("知道了")
+                                            .on_click(|_, window, cx| {
+                                                window.close_dialog(cx);
+                                            }),
+                                    );
+                                }
+                                dialog = dialog.footer(footer);
+                                dialog
                             });
                             TransferState::Ok(format!("发现新版本 {}", rel.tag))
                         } else {
@@ -1303,108 +1353,271 @@ fn run_update_check(
 #[derive(Debug)]
 struct LatestRelease {
     tag: String,
-    page_url: String,
     notes: String,
     asset_name: Option<String>,
     asset_url: Option<String>,
 }
 
-/// Live state of an in-app update-package download.
-#[derive(Debug, Clone)]
-struct DownloadState {
-    /// 0..1 completed fraction.
-    frac: f32,
-    /// True once the package is saved and being opened for installation.
-    done: bool,
-    /// Human-readable file name being fetched.
-    file: String,
+/// Message from the background download thread to the UI loop.
+enum DownloadMsg {
+    Progress(f32),
+    Finished(Result<std::path::PathBuf, String>),
 }
 
-/// Download a release asset inside the app (no browser hop): stream bytes to a
-/// temp file while reporting progress into `download`, then open the package
-/// with the OS default handler (mounts a .dmg) once complete.
+/// Download a release asset inside the app (no browser hop) and keep it running
+/// in the background: progress is reflected in the title bar and the About
+/// page, and the finished package is only revealed to the user — never opened —
+/// so it can be installed after Doit quits.
 ///
 /// The download itself runs on a dedicated Tokio runtime in a background thread
-/// (reqwest can't run on gpui's executor); progress is forwarded over an
-/// mpsc channel back to the UI loop, which updates the panel and re-renders.
+/// (reqwest can't run on gpui's executor); progress is forwarded over a
+/// mpsc channel back to the UI loop, which updates the shared state and
+/// re-renders.
 fn start_update_download(
     entity: Entity<SettingsPanel>,
     url: &str,
     file_name: &str,
+    version: &str,
     window: &mut Window,
     cx: &mut App,
 ) {
-    entity.update(cx, |p, cx| {
-        p.download = Some(DownloadState {
+    // One download at a time; ignore duplicate clicks.
+    if cx
+        .try_global::<DoitAppHandle>()
+        .map(|h| h.0.read(cx).update_download.is_some())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    set_update_download(
+        cx,
+        Some(UpdateDownloadState {
             frac: 0.0,
-            done: false,
             file: file_name.to_string(),
-        });
-        cx.notify();
-    });
+            version: version.to_string(),
+        }),
+    );
+    entity.update(cx, |_, cx| cx.notify());
 
     let url = url.to_string();
     let file_name = file_name.to_string();
-    let dest = std::env::temp_dir().join(&file_name);
-    let (tx, rx) = std::sync::mpsc::channel::<f32>();
-    let dest_for_dl = dest.clone();
-    let downloader = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
+    let version = version.to_string();
+    let dest = download_dest(&file_name);
+    let part = part_path(&dest);
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<DownloadMsg>();
+    std::thread::spawn(move || {
+        let result = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .build();
-        let result = match rt {
-            Ok(rt) => {
-                rt.block_on(download_to_file(&url, &dest_for_dl, |frac| {
-                    let _ = tx.send(frac);
-                }))
-            }
+            .build()
+        {
+            Ok(rt) => rt.block_on(download_to_file(&url, &part, |frac| {
+                let _ = tx.unbounded_send(DownloadMsg::Progress(frac));
+            })),
             Err(e) => Err(format!("初始化下载线程失败：{e}")),
         };
-        // Closing tx signals the UI loop that the download finished.
-        let _ = result;
+        // Only a fully written file gets the final name.
+        let result = result.and_then(|_| {
+            std::fs::rename(&part, &dest)
+                .map(|_| dest.clone())
+                .map_err(|e| format!("保存安装包失败：{e}"))
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+        let _ = tx.unbounded_send(DownloadMsg::Finished(result));
     });
 
     window.spawn(&*cx, async move |async_cx| {
-        let rx = rx;
-        while let Ok(frac) = rx.recv() {
-            let _ = async_cx.update(|_window, app_cx| {
-                entity.update(app_cx, |p, cx| {
-                    if let Some(dl) = p.download.as_mut() {
-                        dl.frac = frac;
-                    }
-                    cx.notify();
-                });
-            });
-        }
-        let _ = async_cx.update(move |_window, app_cx| {
-            entity.update(app_cx, |p, cx| {
-                if dest.exists() {
-                    p.download = Some(DownloadState {
-                        frac: 1.0,
-                        done: true,
-                        file: file_name.clone(),
+        while let Some(msg) = futures::StreamExt::next(&mut rx).await {
+            match msg {
+                DownloadMsg::Progress(frac) => {
+                    let _ = async_cx.update(|_window, app_cx| {
+                        update_download_progress(app_cx, frac);
+                        entity.update(app_cx, |_, cx| cx.notify());
                     });
-                    cx.notify();
-                    // Open the downloaded package for installation (OS-default
-                    // handler: mounts+opens .dmg on macOS).
-                    let opener = if cfg!(target_os = "macos") {
-                        "open"
-                    } else if cfg!(target_os = "windows") {
-                        "start"
-                    } else {
-                        "xdg-open"
-                    };
-                    let _ = std::process::Command::new(opener).arg(&dest).spawn();
-                } else {
-                    p.download = None;
-                    p.update_state = TransferState::Err("下载安装包失败。".into());
-                    cx.notify();
                 }
-            });
-        });
-        let _ = downloader.join();
+                DownloadMsg::Finished(result) => {
+                    let _ = async_cx.update(move |window, app_cx| {
+                        set_update_download(app_cx, None);
+                        match result {
+                            Ok(path) => {
+                                entity.update(app_cx, |p, cx| {
+                                    p.update_state = TransferState::Ok(format!(
+                                        "{version} 已下载完成，请退出 Doit 后安装。"
+                                    ));
+                                    cx.notify();
+                                });
+                                // The installer must not be launched while the
+                                // old version is still running: tell the user
+                                // where it is and let them install after quit.
+                                show_download_complete_dialog(window, app_cx, &path);
+                            }
+                            Err(err) => {
+                                entity.update(app_cx, |p, cx| {
+                                    p.update_state =
+                                        TransferState::Err(format!("下载安装包失败：{err}"));
+                                    cx.notify();
+                                });
+                                let message = format!("{err}\n\n请检查网络后重试。");
+                                window.open_alert_dialog(app_cx, move |alert, _, _| {
+                                    alert
+                                        .title("下载安装包失败")
+                                        .description(message.clone())
+                                        .ok_text("知道了")
+                                });
+                            }
+                        }
+                    });
+                    break;
+                }
+            }
+        }
     })
     .detach();
+}
+
+/// Store (or clear) the shared download state shown by the title bar.
+fn set_update_download(cx: &mut App, value: Option<UpdateDownloadState>) {
+    if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+        let app = handle.0.clone();
+        app.update(cx, |app, cx| {
+            app.update_download = value;
+            cx.notify();
+        });
+    }
+}
+
+fn update_download_progress(cx: &mut App, frac: f32) {
+    if let Some(handle) = cx.try_global::<DoitAppHandle>() {
+        let app = handle.0.clone();
+        app.update(cx, |app, cx| {
+            if let Some(dl) = app.update_download.as_mut() {
+                dl.frac = frac;
+            }
+            cx.notify();
+        });
+    }
+}
+
+/// Where the installer is saved. Prefer `~/Downloads` (easy to find and
+/// survives a reboot); fall back to the app's own data dir when the system
+/// denies access (macOS TCC can block Downloads for unsigned apps), and to the
+/// temp dir as a last resort.
+fn download_dest(file_name: &str) -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = home.as_ref() {
+        candidates.push(home.join("Downloads"));
+        candidates.push(home.join(".doit-gpui").join("updates"));
+    }
+    candidates.push(std::env::temp_dir().join("doit-updates"));
+
+    for base in candidates {
+        if !dir_writable(&base) {
+            continue;
+        }
+        let dest = base.join(file_name);
+        // A stale package with the same name must not poison this download.
+        let _ = std::fs::remove_file(&dest);
+        return dest;
+    }
+    std::env::temp_dir().join(file_name)
+}
+
+/// True when `dir` exists (or can be created) and a probe file can be written
+/// there. Used to skip locations the OS refuses without failing the download.
+fn dir_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".doit-download-probe");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// `foo.dmg` downloads into `foo.dmg.part` and is renamed once complete.
+fn part_path(dest: &std::path::Path) -> std::path::PathBuf {
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    std::path::PathBuf::from(part)
+}
+
+/// Completion prompt: the package is ready, install it after quitting.
+fn show_download_complete_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    path: &std::path::Path,
+) {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let display = path.display().to_string();
+    let path = path.to_path_buf();
+    let reveal = if cfg!(target_os = "macos") {
+        "在访达中显示"
+    } else {
+        "打开所在文件夹"
+    };
+    let install_hint = if cfg!(target_os = "macos") {
+        "请退出 Doit 后，打开安装包并把 Doit 拖入「应用程序」完成安装。"
+    } else {
+        "请退出 Doit 后，运行安装包完成安装。"
+    };
+    window.open_alert_dialog(cx, move |alert, _w, _c| {
+        alert
+            .title("更新下载完成")
+            .description(
+                div()
+                    .v_flex()
+                    .gap_2()
+                    .child(format!("{file} 已保存到："))
+                    .child(display.clone())
+                    .child(install_hint),
+            )
+            .ok_text(reveal)
+            .cancel_text("稍后")
+            .show_cancel(true)
+            .on_ok({
+                let path = path.clone();
+                move |_, _, _| {
+                    reveal_in_file_manager(&path);
+                    true
+                }
+            })
+            .on_cancel(|_, _, _| true)
+    });
+}
+
+/// Show the downloaded package in the platform file manager.
+fn reveal_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,\"{}\"", path.display()))
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = path.parent().unwrap_or(path);
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    }
 }
 
 /// Stream `url` into `dest`, invoking `on_progress` with the 0..1 fraction as
@@ -1503,7 +1716,6 @@ async fn check_latest_release(client: &dyn HttpClient) -> Result<LatestRelease, 
     let v: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|e| format!("解析更新信息失败：{e}"))?;
     let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let page_url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
 
     // The release ships per-arch packages (`-macos-arm64.dmg`, `-macos-x64.dmg`,
@@ -1524,10 +1736,10 @@ async fn check_latest_release(client: &dyn HttpClient) -> Result<LatestRelease, 
             }
         }
     }
-    if tag.is_empty() || page_url.is_empty() {
+    if tag.is_empty() {
         return Err("未能从仓库获取到有效的版本信息。".into());
     }
-    Ok(LatestRelease { tag, page_url, notes, asset_name, asset_url })
+    Ok(LatestRelease { tag, notes, asset_name, asset_url })
 }
 
 /// Compare dotted-numeric versions ("0.1.7" vs "0.1.10"); non-numeric segments count as 0.
@@ -1541,15 +1753,6 @@ fn cmp_version(a: &str, b: &str) -> Ordering {
         }
     }
     Ordering::Equal
-}
-
-/// Truncate by characters (release notes are markdown, may contain CJK/emoji).
-fn shorten(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect::<String>().trim_end().to_string()
-    }
 }
 
 // ── Small composition helpers ───────────────────────────────────────────────

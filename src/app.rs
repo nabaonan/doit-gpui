@@ -163,6 +163,9 @@ pub struct DoitApp {
     /// 正在手动调整设置弹框尺寸时的状态：(按下点, 起始宽, 起始高)。
     settings_resize: Option<(Point<Pixels>, Pixels, Pixels)>,
 
+    /// 后台下载中的更新安装包；标题栏据此显示进度。
+    pub update_download: Option<UpdateDownloadState>,
+
     _input_sub: Subscription,
     _calendar_sub: Subscription,
 }
@@ -344,6 +347,7 @@ impl DoitApp {
             collapsed: HashSet::new(),
             settings_dialog_size: (px(720.), px(500.)),
             settings_resize: None,
+            update_download: None,
             _input_sub: input_sub,
             _calendar_sub: calendar_sub,
             stats_period: StatsPeriod::Month,
@@ -1074,6 +1078,9 @@ impl DoitApp {
                     .flex()
                     .gap_1()
                     .items_center()
+                    .when_some(self.render_update_download_chip(cx), |el, chip| {
+                        el.child(chip)
+                    })
                     .child(self.render_category_filter(window, cx))
                     .child(
                         Button::new("backup-btn")
@@ -1107,6 +1114,35 @@ impl DoitApp {
                             })),
                     ),
             )
+    }
+
+    /// 标题栏的下载进度胶囊：后台下载更新安装包时出现，完成后消失。
+    fn render_update_download_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dl = self.update_download.as_ref()?;
+        let pct = (dl.frac * 100.0).round() as i32;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .h(px(26.))
+                .rounded_md()
+                .bg(cx.theme().muted)
+                .child(
+                    Icon::empty()
+                        .path("icons/download.svg")
+                        .small()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("正在下载 {} · {pct}%", dl.version)),
+                )
+                .into_any_element(),
+        )
     }
 }
 

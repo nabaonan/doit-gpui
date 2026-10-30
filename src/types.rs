@@ -173,6 +173,19 @@ pub enum CatFilter {
     Id(String),
 }
 
+/// An in-flight update-package download. Kept on [`crate::app::DoitApp`] so
+/// the title bar and the About page can both show progress while the download
+/// runs in the background.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateDownloadState {
+    /// 0..1 completed fraction.
+    pub frac: f32,
+    /// File name being fetched.
+    pub file: String,
+    /// Release tag this package installs (e.g. `v0.1.15`).
+    pub version: String,
+}
+
 /// A portable snapshot of all user data, used for WebDAV sync (upload/download).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SyncSnapshot {
