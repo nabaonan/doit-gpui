@@ -28,5 +28,11 @@
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <!-- Opt out of the macOS Touch Bar API: AppKit's _NSTouchBarFinderObservation KVO
+       teardown races window destruction on Touch Bar Macs and crashes on app quit
+       (NSRangeException -> SIGILL). This app never uses NSTouchBar, so disabling it
+       removes the crash with no functional downside. -->
+  <key>NSFunctionBarAPIEnabled</key>
+  <false/>
 </dict>
 </plist>
