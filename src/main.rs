@@ -1,53 +1,21 @@
-mod app;
-mod app_assets;
-mod backup;
-mod crypto;
-mod http;
-mod label_dialogs;
-mod settings;
-mod types;
-mod webdav;
+//! doit-gpui 应用入口（可执行文件）
+//!
+//! 业务实现全部位于库 crate `doit_gpui`（见 `src/lib.rs`），
+//! 这里只负责启动 GPUI 应用并打开主窗口。
 
-use app::{DoitApp, DoitAppHandle};
-use app_assets::AppAssets;
-use gpui_kit::component::Root;
-use gpui_kit::gpui::{Bounds, SharedString, WindowBounds, WindowOptions, px};
+use doit_gpui::app::{apply_component_theme, AppState, AppView};
 use gpui_kit::*;
 
 fn main() {
-    // Desktop gpui does not install an HTTP client by default, and the default
-    // wiring would honor system proxies (a common cause of private-NAS WebDAV
-    // failures). Build our own: no proxy, bounded timeouts.
-    let http_client = http::new_http_client();
-
-    gpui_kit::application()
-        .with_http_client(http_client)
-        .with_assets(AppAssets::new())
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            // Give the OS identity so system notifications show for the app.
-            cx.set_app_identity("com.doit.gpui", "Doit");
-            // Prepare the machine-local encryption key up front so WebDAV
-            // password encryption works (and failures surface early).
-            let _ = crypto::ensure_key();
-
-            let opts = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    gpui_kit::gpui::Size::new(px(860.), px(640.)),
-                    cx,
-                ))),
-                titlebar: Some(gpui_kit::gpui::TitlebarOptions {
-                    title: Some(SharedString::from("Doit")),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            cx.open_window(opts, |window, cx| {
-                let app = cx.new(|cx| DoitApp::new(window, cx));
-                cx.set_global(DoitAppHandle(app.clone()));
-                cx.new(|cx| Root::new(app, window, cx))
-            })
-            .expect("failed to open window");
-        });
+    gpui_kit::application().run(|cx| {
+        gpui_kit::init(cx);
+        // 把 gpui-component 内置主题的 focus ring / input 边框统一覆盖为薄荷绿，
+        // 与应用自身主题联动（设置页切换主题时会再次调用保持同步）
+        apply_component_theme(false, cx);
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let state = cx.new(|cx| AppState::new(window, cx));
+            cx.new(|cx| AppView::new(state.clone(), window, cx))
+        })
+        .expect("failed to open window");
+    });
 }

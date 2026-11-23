@@ -1,48 +1,28 @@
 [package]
 name = "doit-gpui"
-version = "0.1.17"
-edition = "2021"
-description = "Doit - A minimalist todo app rewritten in pure Rust with GPUI Kit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "doit 桌面待办的 GPUI Kit 纯原生复刻版"
+license = "Apache-2.0"
 
 [dependencies]
-# gpui-kit bundles gpui (gpui-pre) at a matching revision; bumping it upgrades
-# gpui itself to the bundled gpui-pre (0.3.10 as of gpui-kit 0.8.1).
-gpui-kit = "=0.8.1"
-# chrono is already a compiled dependency of gpui itself (its calendar/date-picker
-# link it); adding it here costs no new compilation. Needed for correct local-date
-# handling (calendar view, timeline grouping) that std alone cannot provide.
-chrono = "0.4"
-# serde / serde_json / base64 are likewise already in the resolved dependency tree
-# (gpui's http client and components depend on them); these are used for the
-# WebDAV snapshot sync (JSON serialization + HTTP Basic auth).
+# GPUI Kit 0.8：单一依赖带入 GPUI + gpui-base + gpui-component + 图标资产
+gpui-kit = "0.8.1"
+
+# 数据契约与持久化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
-# futures is already a dependency of gpui's async/http stack; used to read the
-# WebDAV response body (AsyncBody implements futures::AsyncRead).
-futures = "0.3"
-# tokio is already a compiled dependency of gpui's stack; we own a handle so the
-# reqwest-backed WebDAV requests run on a real Tokio runtime regardless of gpui's
-# own executor.
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
-# gpui-pre-reqwest is gpui's own vendored reqwest fork (0.12.15 is its latest
-# release, matching gpui-pre 0.3.x). We build the desktop HTTP client from it
-# with proxies disabled,
-# because OS/environment proxies are the most common reason a private NAS
-# WebDAV endpoint fails with "error sending request for url". The feature set
-# mirrors gpui-pre-reqwest-client's, so nothing new gets compiled.
-gpui-pre-reqwest = { version = "=0.12.15", default-features = false, features = [
-    "charset",
-    "http2",
-    "macos-system-configuration",
-    "multipart",
-    "rustls-tls-native-roots",
-    "socks",
-    "stream",
-] }
-# Encrypt the WebDAV password at rest (and in cloud snapshots): AES-256-GCM
-# (AEAD) with a machine-local random key, stored in a separate key file.
-# RustCrypto crates are pure Rust, no C toolchain needed.
-aes-gcm = "0.10"
-# CSPRNG for key/nonce generation.
-rand = "0.8"
+dirs = "6"
+chrono = "0.4"
+
+# macOS 文字渲染所需（gpui-kit 默认已通过 platform 传递启用 font-kit，
+# 这里显式声明 gpui-pre-platform 以便在直接依赖时也能保证字体系统可用）
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-platform = { version = "0.3.10", features = ["font-kit"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+

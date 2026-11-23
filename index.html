@@ -1,0 +1,1810 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-skin="mint">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>doit-gpui · 基于 GPUI Kit 的原生复刻原型</title>
+<style>
+  /* ============ 设计令牌（对齐手机端 Color.kt，视觉升级） ============ */
+  :root{
+    --mint:#3FBB9C; --mint-deep:#1E7D66; --mint-soft:#E8F7F1;
+    --ink:#16211F; --ink-2:#5A6B66; --ink-3:#93A39C; --line:#E6EDEA;
+    --card:#FFFFFF; --glass:rgba(255,255,255,.72);
+    --bg:#EEF4F1;
+    --prio-urgent:#E5484D; --prio-high:#F07B3F; --prio-normal:#4A90D9; --prio-low:#96A5A0;
+    --heat-0:#EAF0ED; --heat-1:#CDE9DF; --heat-2:#9BD8C4; --heat-3:#5FC2A4; --heat-4:#2E9C7C;
+    --warn:#F0A23B; --warn-bg:#FFF6E8;
+    --shadow-sm:0 1px 2px rgba(20,40,35,.05);
+    --shadow:0 6px 24px rgba(20,50,40,.07), 0 2px 6px rgba(20,50,40,.04);
+    --shadow-lg:0 18px 50px rgba(18,46,38,.16);
+    --radius:16px; --radius-sm:11px;
+    --tb-h:60px;
+    --heat-cell:13px; --heat-gap:5px;
+    --done-anim:#3FBB9C;
+  }
+  [data-theme="dark"]{
+    --mint:#46C7A6; --mint-deep:#7FE3C8; --mint-soft:#16302A;
+    --ink:#E8F1EE; --ink-2:#9FB0AA; --ink-3:#6B7B75; --line:#26322F;
+    --card:#19221F; --glass:rgba(25,34,31,.62);
+    --bg:#0C1316;
+    --prio-urgent:#FF6B6F; --prio-high:#FF9A6B; --prio-normal:#6FA8DC; --prio-low:#A9B5B0;
+    --heat-0:#1B2422; --heat-1:#1F3A33; --heat-2:#27584B; --heat-3:#34866F; --heat-4:#46C7A6;
+    --warn:#F0A23B; --warn-bg:#2A2415;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.3);
+    --shadow:0 8px 28px rgba(0,0,0,.4);
+    --shadow-lg:0 22px 60px rgba(0,0,0,.55);
+    --done-anim:#46C7A6;
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}  /* html/body 均不滚动，滚动唯一发生在 #main */
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    /* background-attachment: fixed：渐变层固定在视口，滚动不再出现“首屏渐变 + 下方纯色”的割裂带 */
+    background:
+      radial-gradient(1200px 500px at 80% -10%, color-mix(in srgb,var(--mint) 12%, transparent), transparent 60%),
+      radial-gradient(900px 400px at -5% 110%, color-mix(in srgb,var(--mint) 9%, transparent), transparent 55%),
+      var(--bg);
+    background-attachment: fixed, fixed, scroll;
+    color:var(--ink); -webkit-font-smoothing:antialiased; font-size:14px;
+    /* body 锁定为视口高（100vh）且不滚动：flex 子 #main 承担唯一滚动，sticky 相对 #main 生效，吸顶稳定 */
+    display:flex; flex-direction:column; height:100vh; overflow:hidden;
+    transition:background .4s, color .3s;
+  }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px}
+  ::-webkit-scrollbar-thumb:hover{background:var(--ink-3)}
+  svg{display:block}
+
+  /* ============ 顶部玻璃导航（单行布局） ============ */
+  #topbar{position:sticky;top:0;z-index:30;height:var(--tb-h);
+    background:var(--glass); backdrop-filter:blur(20px) saturate(1.4);
+    -webkit-backdrop-filter:blur(20px) saturate(1.4);display:flex;align-items:center;overflow:hidden}
+  /* 一行内：logo(最左) → tab(左对齐成组) → 弹性空白 → 状态胶囊组(最右)，全程不换行。
+     铺满窗口宽度（不居中），左右各留 26px 内边距，保证 logo 贴左缘、状态胶囊贴右缘，
+     并与 .page 内容区左右边界严格对齐 */
+  .tb-inner{width:100%;min-width:0;box-sizing:border-box;padding:0 26px;
+    display:flex;align-items:center;gap:18px;flex-wrap:nowrap;white-space:nowrap}
+  .brand{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+  .brand .logo{width:34px;height:34px;border-radius:11px;
+    background:linear-gradient(135deg,var(--mint),var(--mint-deep));
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:17px;
+    box-shadow:0 4px 14px color-mix(in srgb,var(--mint) 40%,transparent)}
+  .brand b{font-size:16px;letter-spacing:.01em}
+  .brand small{display:block;color:var(--ink-3);font-weight:400;font-size:10.5px}
+  /* tab 与胶囊同高 38px，保证同一水平中线对齐；空间不足时 tab 组内部横向滚动，绝不折行 */
+  .tb-nav{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:0;
+    flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .tb-nav::-webkit-scrollbar{display:none}
+  .tb-nav button{position:relative;height:38px;box-sizing:border-box;flex:0 0 auto;
+    border:none;background:transparent;color:var(--ink-2);
+    padding:0 15px;border-radius:11px;cursor:pointer;font-size:14px;font-weight:500;
+    display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;transition:.18s}
+  .tb-nav button svg{width:18px;height:18px;flex:0 0 18px}
+  .tb-nav button:hover{background:var(--mint-soft);color:var(--mint-deep)}
+  /* 选中态仅用背景/字重表达，不再使用下方指示横线 */
+  .tb-nav button.active{background:var(--mint-soft);color:var(--mint-deep);font-weight:700}
+  /* 顶部胶囊组：所有胶囊统一尺寸（同高 / 同圆角 / 同内边距 / 同基线） */
+  .tb-pills{display:flex;align-items:center;gap:10px;flex:0 0 auto;margin-left:auto;
+    flex-wrap:nowrap;white-space:nowrap}
+  .tb-pill{height:38px;box-sizing:border-box;display:inline-flex;align-items:center;gap:8px;flex:0 0 auto;
+    padding:0 13px;border:1px solid var(--line);border-radius:19px;background:var(--card);
+    color:var(--ink-2);font-size:12.5px;font-weight:600;white-space:nowrap;transition:.18s}
+  .tb-pill.clickable{cursor:pointer}
+  .tb-pill.clickable:hover{border-color:var(--mint);background:var(--mint-soft);color:var(--mint-deep)}
+  /* 日期 + 今日进度合并胶囊：日期文字 | 竖分隔 | 含百分比进度环 */
+  .tb-dp{gap:9px}
+  .tb-dp-sep{width:1px;height:16px;background:var(--line);margin:0 1px}
+  .tb-dp .ring-wrap{margin:0}
+  .tb-dp .ring-sm svg{width:30px;height:30px}
+  .sync-status .cloud{width:18px;height:18px;color:var(--mint);flex:0 0 18px}
+  .sync-status.spin .cloud{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* 已与远程同步：薄荷绿常态 + 云中对钩 */
+  .sync-status.synced .cloud{color:var(--mint)}
+  /* 有本地更改、尚未与远程同步：琥珀色警示 + 云中上传箭头 + 呼吸小圆点 */
+  .sync-status.dirty{border-color:color-mix(in srgb,var(--warn) 46%,var(--line));
+    background:var(--warn-bg);color:var(--warn)}
+  .sync-status.dirty .cloud{color:var(--warn)}
+  .sync-status.dirty .txt{font-weight:700}
+  .sync-status.dirty::before{content:'';width:6px;height:6px;border-radius:50%;flex:0 0 6px;
+    background:var(--warn);animation:syncPulse 1.6s ease-in-out infinite}
+  @keyframes syncPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+  .sync-status.dirty.clickable:hover{border-color:var(--warn);
+    background:color-mix(in srgb,var(--warn) 18%,var(--card));color:var(--warn)}
+  /* 同步关闭：灰显，不带对钩 */
+  .sync-status.off{opacity:.62}
+  .sync-status.off .cloud{color:var(--ink-3)}
+  /* 设置页内的同步状态行 */
+  .sync-state{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700}
+  .sync-state svg{width:17px;height:17px}
+  .sync-state.synced{color:var(--mint-deep)}
+  .sync-state.dirty{color:var(--warn)}
+  .sync-state.syncing{color:var(--ink-2)}
+  .sync-state.off{color:var(--ink-3)}
+
+  /* ============ 主内容 ============ */
+  #main{flex:1;overflow-y:auto;min-height:0}  /* 唯一滚动容器（body 已 overflow:hidden），min-height:0 保证 flex 内可收缩滚动 */
+  .page{width:100%;padding:30px 26px 40px;animation:fadeUp .35s ease both}  /* 铺满窗口宽，与顶栏左右对齐 */
+  .page-today{padding-bottom:104px}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @keyframes qaIn{from{opacity:0}to{opacity:1}}
+  /* 同页局部刷新（内联新增/提交/勾选）不重播整页与列表入场动画，避免闪烁 */
+  body.quiet-render .page,
+  body.quiet-render .qa-bar{animation:none}
+  .kicker{font-size:12px;color:var(--mint-deep);font-weight:700;letter-spacing:.06em}
+  .page h1{font-size:27px;margin:5px 0 3px;display:flex;align-items:center;gap:14px;font-weight:750}
+  .sub{color:var(--ink-3);font-size:13px;margin-bottom:16px}
+  .filterbar{display:flex;gap:8px;flex-wrap:nowrap;overflow-x:auto;padding-bottom:5px;scrollbar-width:thin}
+  .filterbar .chip{flex:0 0 auto}
+  .filterbar::-webkit-scrollbar{height:5px}
+  .filterbar::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  .filterbar::-webkit-scrollbar-track{background:transparent}
+  /* 分类筛选吸顶：滚动时固定于顶部导航（60px）正下方；铺满页面宽。
+     胶囊距顶栏保留 12px 间距（避免贴在一起）：由容器上下相等的内边距提供，初始与吸顶一致（top:0）；
+     上下内边距保持相等（各 12px，padding-block 独立属性，不被断点 padding-inline 覆盖）；
+     背景与页面完全一致的纯 var(--bg)，不使用半透明 / 毛玻璃 */
+  .filter-sticky,.range-sticky{position:sticky;top:0;z-index:20;
+    margin-inline:-26px;padding-block:12px;padding-inline:26px;
+    background:var(--bg)}
+  /* 今日页 / 统计页：分类条与日期切换条距顶部导航保留 12px 间距，吸顶时同样 */
+  .page-today{padding-top:0}
+  .page-today .filterbar{margin:0}
+  .page-stats{padding-top:0}
+  /* 首页：分类 tab 切换区与任务列表共用同一左边界，随 .page 的基准线一起对齐 */
+  .page-today .filterbar,.page-today .task-group{margin-left:0;padding-left:0}
+  .chip{border:1px solid var(--line);background:var(--card);color:var(--ink-2);
+    padding:7px 14px;border-radius:20px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:6px;transition:.15s}
+  .chip:hover{border-color:var(--mint);color:var(--mint-deep)}
+  /* 选中态不加投影：filterbar 横向滚动容器会裁掉投影，纯色底 + 白字已足够醒目 */
+  .chip.active{background:var(--mint);color:#fff;border-color:var(--mint);
+    text-shadow:0 1px 2px rgba(0,0,0,.2)}  /* 浅色分类底上白字仍保持清晰 */
+  .chip .cat-dot{width:8px;height:8px;border-radius:50%}
+
+  /* ============ 任务卡片 ============ */
+  .task{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:10px 16px;margin-bottom:0;box-shadow:var(--shadow-sm);position:relative;transition:.2s;animation:fadeUp .3s both}
+  .task-group{margin-bottom:12px}  /* 相邻同级任务间距 12px（顶级/子级/嵌套一致，避免紧贴） */
+  .task:hover{box-shadow:var(--shadow);transform:translateY(-2px);border-color:color-mix(in srgb,var(--mint) 35%,var(--line))}
+  .task.done{opacity:.6}
+  .task-row{display:flex;align-items:center;gap:13px}
+  /* 圆形勾选控件：外圈恒为纯圆；未完成空心圆，完成态圆底 + 白色 SVG 曲线对勾（无矩形 / 无伪元素方框） */
+  .check{width:23px;height:23px;border-radius:9999px;border:2px solid var(--ink-3);flex:0 0 23px;
+    box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;
+    cursor:pointer;transition:.18s;background:var(--card);color:#fff}
+  .check .check-mark{width:15px;height:15px;display:block;pointer-events:none}
+  .subtask .check .check-mark{width:15px;height:15px}  /* 父/子勾选圈同尺寸：对勾也统一 15px */
+  .check:hover{border-color:var(--mint);transform:scale(1.08)}
+  .check.on{background:var(--done-anim);border-color:transparent}
+  /* 含子任务的父任务：勾选圈只读，完成态由子任务推导，不接受直接完成。
+     未完成态虚线圈用 SVG stroke-dasharray 绘制（.dash-circle），CSS 边框置透明，跨平台虚线均匀一致。 */
+  .check.readonly{cursor:default;opacity:.72}
+  .check.readonly:hover{transform:none}
+  /* 只读虚线圈：去掉 2px 透明边框，让 SVG 按完整 23px 渲染；r=10.8 使外径与实线圈一致 */
+  .check.dash-circle{border:0}
+  .check.dash-circle:hover{border:0}
+  .check .dash-ring{width:100%;height:100%;display:block;color:var(--ink-3)}
+  .check.on.readonly{border-color:transparent;opacity:1}
+  .task-body{flex:1;min-width:0;cursor:inherit;display:flex;flex-direction:column;justify-content:center;
+    align-self:stretch;gap:6px}
+  /* 单击卡片任意位置切换展开 / 收缩：仅含子任务的卡片可点，勾选圈/优先级/展开按钮仍各自独立 */
+  .task.has-subs,.subtask.has-subs{cursor:pointer}
+  .task.has-subs .task-body,.subtask.has-subs .task-body{cursor:pointer}
+  .task-title{font-size:16px;font-weight:600;line-height:1.4;word-break:break-word}
+  .task-title.done{text-decoration:line-through;color:var(--ink-3)}
+  /* 卡片收紧为单行：分类标签并入右侧操作行；第二行仅承载月历完成时间与内联编辑提示 */
+  .task-sub{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;text-align:right}
+  .prio-tag{font-size:11px;padding:2px 9px;border-radius:7px;font-weight:700;display:inline-flex;align-items:center;gap:5px}
+  .prio-dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:currentColor}
+  .prio-urgent{color:var(--prio-urgent);background:color-mix(in srgb,var(--prio-urgent) 14%,transparent)}
+  .prio-high{color:var(--prio-high);background:color-mix(in srgb,var(--prio-high) 14%,transparent)}
+  .prio-normal{color:var(--prio-normal);background:color-mix(in srgb,var(--prio-normal) 14%,transparent)}
+  .prio-low{color:var(--prio-low);background:color-mix(in srgb,var(--prio-low) 14%,transparent)}
+  /* 卡片内优先级只读：修改入口统一为右键菜单 */
+  .prio-readonly{cursor:default;white-space:nowrap;flex:0 0 auto;font-family:inherit}
+  /* 内联编辑：标题原地变为输入框，不弹任何对话框 */
+  .inline-edit-input{width:100%;font-size:16px;font-weight:600;line-height:1.4;color:var(--ink);
+    font-family:inherit;border:1px solid var(--mint);border-radius:9px;background:var(--card);
+    padding:4px 9px;outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 15%,transparent)}
+  .inline-edit-input::placeholder{color:var(--ink-3);font-weight:400}
+  .task.editing,.subtask.editing{border-color:var(--mint)}
+  .cat-tag{font-size:11px;color:var(--ink-3);display:flex;align-items:center;gap:5px}
+  /* 分类标签进入右侧操作行，与优先级标签同一行 */
+  .side-cat{flex:0 0 auto;white-space:nowrap}
+  .cat-tag .cat-dot{width:8px;height:8px;border-radius:50%}
+  .task-meta{font-size:12px;color:var(--ink-3)}
+  .sub-prog{flex:1;height:6px;background:var(--line);border-radius:4px;overflow:hidden;max-width:130px}
+  .sub-prog>i{display:block;height:100%;background:linear-gradient(90deg,var(--mint),var(--mint-deep));border-radius:4px;transition:width .3s}
+  /* 顶层与子任务右侧统一：优先级 / 环形进度 / 展开按钮 全部同一行 */
+  .task-side{flex:0 0 auto;display:flex;flex-direction:row;align-items:center;justify-content:flex-end;
+    gap:8px;min-width:0;align-self:center;white-space:nowrap}
+  .side-prio{transition:.15s}
+  .exp-btn{width:28px;height:28px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink-2);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.15s;flex:0 0 28px}
+  .exp-btn:hover{border-color:var(--mint);color:var(--mint-deep);background:var(--mint-soft)}
+  .exp-btn svg{width:16px;height:16px;transition:.2s}
+  .exp-btn.open svg{transform:rotate(180deg)}
+  /* 任务进度：独立环形进度条，不与展开按钮合并 */
+  .task-ring{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto}
+  .task-ring svg{width:20px;height:20px;display:block}
+  .ring-pct{font-size:11px;font-weight:800;color:var(--ink-3);letter-spacing:.02em;white-space:nowrap}
+  /* 完成进度填充层（长按卡片 / 点击圆圈） */
+  .pfill{position:absolute;inset:0;border-radius:inherit;overflow:hidden;pointer-events:none;z-index:0}
+  /* 完成进度条：仅「长按卡片」时由 JS 从 0→100% 推进；颜色取 --done-anim（设置页写入），走满才完成，中途松手回退 */
+  .pfill>i{position:absolute;left:0;top:0;height:100%;width:0;background:var(--done-anim);opacity:.2;
+    box-shadow:0 0 22px color-mix(in srgb,var(--done-anim) 70%,transparent)}
+  .task-row{position:relative;z-index:1}
+  .check.ce{animation:ce .5s cubic-bezier(.34,1.56,.64,1) both}
+  @keyframes ce{0%{transform:scale(1)}45%{transform:scale(1.24)}100%{transform:scale(1)}}
+  .act{width:30px;height:30px;border-radius:9px;border:1px solid var(--line);background:var(--card);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-2);transition:.15s}
+  .act:hover{border-color:var(--mint);color:var(--mint-deep);background:var(--mint-soft)}
+  .act svg{width:16px;height:16px}
+  .subtasks{margin:16px 0 0 52px;display:none;flex-direction:column;gap:12px;position:relative}  /* 父→子 16px + 缩进 52px；无竖线，层级靠缩进 + 间距表达；子任务彼此 12px */
+  .subtasks.open{display:flex;animation:fadeUp .25s both}  /* 展开播放轻微淡入过渡；DOM 不重建，故不会闪烁 */
+  .subtasks .subtasks{margin-left:52px;margin-top:12px}  /* 每一级父子缩进量相等（均 52px）+ 12px 垂直间距 */
+  .subtasks .task-group{margin-bottom:0}  /* 子任务组的 bottom margin 与 .subtasks 的 gap 会叠加，这里归零，间距统一由 gap 承担（12px） */
+  .subtask{display:block;background:color-mix(in srgb,var(--mint-soft) 52%,var(--card));
+    border:1px solid var(--line);border-radius:var(--radius);padding:10px 16px;box-shadow:var(--shadow-sm);transition:.15s;position:relative}
+  .subtask:hover{border-color:color-mix(in srgb,var(--mint) 38%,var(--line));box-shadow:var(--shadow)}
+  .subtask .task-body{cursor:inherit}
+  .subtask .check{width:23px;height:23px;flex:0 0 23px}  /* 父/子勾选圈保持相同尺寸 23px */
+  .subtask .task-title{font-size:15.5px;font-weight:500}
+  .breather{text-align:center;color:var(--ink-3);padding:48px 20px;font-size:14px}
+  .breather .big{font-size:44px;margin-bottom:10px}
+  /* 底部固定快速添加 */
+  .qa-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:20;
+    width:calc(100% - 44px);max-width:980px;display:flex;align-items:center;gap:10px;
+    padding:11px 14px;border:1.5px solid var(--mint);border-radius:var(--radius);
+    background:linear-gradient(180deg, color-mix(in srgb, var(--mint-soft) 55%, var(--card)), var(--card));
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 18px 42px -14px rgba(18,46,38,.4), 0 6px 18px -8px rgba(18,46,38,.22),
+      inset 0 1px 0 rgba(255,255,255,.9);animation:qaIn .25s ease both}
+  .qa-bar:focus-within{border-color:var(--mint-deep);
+    box-shadow:0 20px 46px -14px rgba(18,46,38,.44), 0 6px 18px -8px rgba(18,46,38,.24),
+      0 0 0 3px color-mix(in srgb,var(--mint) 16%,transparent)}
+  /* 左侧优先级选择彩色胶囊：点击弹出下拉选择（紧急/高/普通/低），prio-* 提供背景色 + 文字 */
+  .qa-prio-wrap{position:relative;flex:0 0 auto}
+  .qa-prio{height:34px;padding:0 11px;border-radius:9px;border:1px solid transparent;
+    display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;transition:.15s;
+    font-size:12px;font-weight:700;outline:none}
+  .qa-prio:hover{filter:brightness(.96)}
+  .qa-prio .prio-dot{width:9px;height:9px;flex:0 0 9px;border-radius:50%;background:currentColor}
+  .qa-prio-txt{line-height:1}
+  .qa-prio-wrap svg{width:12px;height:12px;color:currentColor;transition:.2s}
+  .qa-prio-wrap.open svg{transform:rotate(180deg)}
+  .qa-prio-menu{display:none;position:absolute;left:0;bottom:calc(100% + 6px);min-width:150px;
+    background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow-lg);padding:6px;z-index:5}
+  .qa-prio-menu.open{display:block;animation:pop .12s ease}
+  .qa-prio-menu .qa-dd-opt{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:8px;
+    cursor:pointer;font-size:13px;color:var(--ink-2);transition:.12s}
+  .qa-prio-menu .qa-dd-opt:hover{background:var(--mint-soft);color:var(--mint-deep)}
+  .qa-prio-menu .qa-dd-opt .prio-dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px;background:currentColor}
+  .qa-prio-menu .qa-dd-opt.cur{color:var(--mint-deep);font-weight:800}
+  .qa-input{flex:1;min-width:0;border:none;background:transparent;color:var(--ink);font-size:15px;outline:none}
+  .qa-input::placeholder{color:var(--ink-3)}
+  /* 自定义分类下拉（非原生 select） */
+  .qa-dd{position:relative;flex:0 0 auto}
+  .qa-dd-trigger{display:flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--bg);color:var(--ink-2);
+    border-radius:9px;padding:7px 10px;font-size:13px;cursor:pointer;outline:none;transition:.15s}
+  .qa-dd-trigger:hover{border-color:var(--mint);color:var(--mint-deep)}
+  .qa-dd-trigger svg{width:14px;height:14px;color:var(--ink-3);transition:.2s}
+  .qa-dd.open .qa-dd-trigger svg{transform:rotate(180deg)}
+  .qa-dd-dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+  .qa-dd-menu{display:none;position:absolute;right:0;bottom:calc(100% + 6px);min-width:148px;
+    background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:var(--shadow-lg);padding:6px;z-index:5}
+  .qa-dd.open .qa-dd-menu{display:block;animation:pop .12s ease}
+  .qa-dd-opt{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--ink-2);transition:.12s}
+  .qa-dd-opt:hover{background:var(--mint-soft);color:var(--mint-deep)}
+  .qa-dd-opt .qa-dd-dot{width:9px;height:9px}
+  .qa-dd-opt span.lbl{font-weight:500}
+
+  /* ============ 进度环 ============ */
+  .ring-wrap{display:flex;align-items:center;gap:4px}
+  .ring-wrap svg{width:46px;height:46px}
+  /* 今日进度环已移入顶部栏的 .tb-dp 胶囊（日期 | 环内百分比） */
+
+  /* ============ 统计 ============ */
+  .range-tabs{display:flex;gap:7px;margin-bottom:10px}  /* 切换条到内容区间距缩小：容器 padding-block 12px + 此处 10px = 22px */
+  .range-tabs button{border:1px solid var(--line);background:var(--card);color:var(--ink-2);
+    padding:8px 18px;border-radius:11px;cursor:pointer;font-size:13px;transition:.15s}
+  .range-tabs button:hover{border-color:var(--mint)}
+  .range-tabs button.on{background:var(--mint);color:#fff;border-color:var(--mint);box-shadow:0 4px 12px color-mix(in srgb,var(--mint) 34%,transparent)}
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:18px}
+  .stat-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px;box-shadow:var(--shadow-sm);transition:.2s;min-width:0}
+  .stat-card:hover{box-shadow:var(--shadow);transform:translateY(-2px)}
+  .stat-card h3{font-size:14px;margin-bottom:16px;color:var(--ink-2);font-weight:650}
+  .heat{display:grid;grid-template-columns:repeat(53,1fr);grid-template-rows:repeat(7,1fr);
+    gap:var(--heat-gap);width:100%;aspect-ratio:53/7;overflow:visible;padding:3px;max-width:100%;min-width:0}
+  /* 近一周 / 近一月：固定 7 列（周一→周日），行数与高度由 JS 按周数注入，格子恒为正方形。
+     gap 置 0（水平 6 处 vs 垂直 rows-1 处不对称会破坏正方形），改用 cell 白色 border 模拟等距间隔 */
+  .heat.cols7{grid-template-columns:repeat(7,1fr);grid-template-rows:repeat(var(--heat-rows,1),1fr);
+    padding:0;min-height:0;gap:0}
+  .heat.cols7 .cell{border:2.5px solid var(--card);border-radius:12px}
+  .heat .cell{width:100%;height:100%;border-radius:4px;background:var(--heat-0);transition:.15s}
+  .heat .cell:hover{outline:2px solid var(--mint);outline-offset:1px}
+  .heat-head{display:grid;grid-template-columns:repeat(7,1fr);gap:0;margin-bottom:6px}
+  .heat-head span{text-align:center;font-size:10px;color:var(--ink-3);font-weight:600}
+  .heat-legend{display:flex;align-items:center;gap:4px;margin-top:12px;font-size:11px;color:var(--ink-3)}
+  .heat-legend i{width:11px;height:11px;border-radius:3px}
+  .ring-box{display:flex;align-items:center;gap:20px;min-width:0;flex-wrap:wrap}
+  .ring-legend{display:flex;flex-direction:column;gap:8px;font-size:13px}
+  .ring-legend div{display:flex;align-items:center;gap:8px}
+  .ring-legend .cat-dot{width:9px;height:9px;border-radius:50%}
+  .line-box{width:100%;min-width:0}
+  .line-box svg{width:100%;height:170px;display:block}
+  /* 统计图表节点：热力色块 / 环形扇区 + 图例 / 折线数据点，均可点击查看完成数 */
+  .heat .cell[data-chart]{cursor:pointer}
+  .heat .cell[data-chart]:hover{outline:2px solid var(--mint);outline-offset:1px}
+  .ring-arc{cursor:pointer;transition:stroke-width .15s}
+  .ring-arc:hover{stroke-width:18}
+  .ring-legend .chart-legend-row{cursor:pointer;border-radius:8px;padding:3px 6px;margin:-3px -6px;transition:background .15s}
+  .ring-legend .chart-legend-row:hover{background:var(--mint-soft)}
+  .chart-hit{cursor:pointer;fill:transparent}
+  .chart-dot{pointer-events:none}
+  .chart-hint{font-size:11px;color:var(--ink-3);margin:-8px 0 12px;font-weight:400}
+  /* 统一的图表 tooltip：悬停预览、点击固定 */
+  .chart-tip{position:fixed;z-index:90;pointer-events:none;left:0;top:0;
+    min-width:150px;max-width:260px;background:var(--card);color:var(--ink);
+    border:1px solid var(--line);border-radius:12px;padding:10px 13px;box-shadow:var(--shadow-lg);
+    opacity:0;transform:translateY(5px) scale(.98);transition:opacity .14s,transform .14s}
+  .chart-tip.show{opacity:1;transform:none}
+  .chart-tip .ct-label{font-size:11px;color:var(--ink-3);font-weight:650;letter-spacing:.02em;margin-bottom:5px}
+  .chart-tip .ct-main{display:flex;align-items:baseline;gap:5px;font-size:13px;color:var(--ink-2);white-space:nowrap}
+  .chart-tip .ct-main b{font-size:23px;font-weight:800;color:var(--mint-deep);line-height:1}
+  .chart-tip .ct-extra{margin-top:6px;font-size:11px;color:var(--ink-3)}
+  .chart-tip::after{content:'';position:absolute;left:50%;bottom:-6px;width:10px;height:10px;
+    transform:translateX(-50%) rotate(45deg);background:var(--card);
+    border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .chart-tip.below::after{bottom:auto;top:-6px;border-right:none;border-bottom:none;
+    border-left:1px solid var(--line);border-top:1px solid var(--line)}
+
+  /* ============ 月历（左右布局） ============ */
+  .cal-layout{display:flex;gap:20px;align-items:flex-start}
+  .cal-panel{flex:0 0 332px;max-width:332px;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius);padding:16px;box-shadow:var(--shadow-sm)}
+  .cal-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .cal-mid{flex:1;display:flex;align-items:center;justify-content:center;gap:10px;min-width:0}
+  .cal-head b{font-size:17px;min-width:100px;text-align:center;white-space:nowrap}
+  .cal-nav{cursor:pointer;width:32px;height:32px;border-radius:9px;border:1px solid var(--line);
+    background:var(--card);display:flex;align-items:center;justify-content:center;color:var(--ink-2);font-size:17px;transition:.15s;flex:0 0 auto}
+  .cal-nav:hover{border-color:var(--mint);color:var(--mint-deep);background:var(--mint-soft)}
+  .cal-nav.cal-today{width:auto;padding:0 14px;font-size:13px;font-weight:600;gap:6px;flex:0 0 auto}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+  .cal-dow{text-align:center;font-size:11px;color:var(--ink-3);padding:3px 0;font-weight:600}
+  .cal-cell{aspect-ratio:1;border-radius:10px;border:1px solid var(--line);background:var(--card);
+    padding:6px;cursor:pointer;position:relative;display:flex;flex-direction:column;transition:.15s}
+  .cal-cell:hover{border-color:var(--mint);transform:translateY(-2px);box-shadow:var(--shadow-sm)}
+  .cal-cell.today{border-color:var(--mint);box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 22%,transparent)}
+  .cal-cell.sel{border-color:var(--mint);background:var(--mint-soft);box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 16%,transparent)}
+  .cal-cell .d{font-size:12px;font-weight:600;line-height:1}
+  .cal-cell .cal-dot{width:6px;height:6px;border-radius:50%;background:var(--mint);margin-top:5px;
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 18%,transparent)}
+  .cal-daylist{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius);padding:18px;box-shadow:var(--shadow-sm);overflow:auto;max-height:80vh}
+  .cal-daylist h3{margin:0 0 16px;font-size:16px;color:var(--ink-2)}
+  .cal-daylist .task-group:last-child{margin-bottom:0}
+
+  /* ============ 设置 ============ */
+  .set-section{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px 22px;margin-bottom:16px;box-shadow:var(--shadow-sm);transition:.2s}
+  .set-section:hover{box-shadow:var(--shadow)}
+  .set-section h3{font-size:14px;margin-bottom:14px;font-weight:650}
+  .field{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}
+  .field:last-child{border-bottom:none}
+  .field label{color:var(--ink-2);font-weight:500}
+  .seg{display:flex;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:var(--bg)}
+  .seg button{border:none;background:transparent;padding:8px 18px;cursor:pointer;color:var(--ink-2);font-size:13px;transition:.15s}
+  .seg button.on{background:var(--mint);color:#fff}
+  /* 进度色板：扁平清新的选中态——白描边 + 同色柔光，无黑边框 */
+  .swatch{width:30px;height:30px;border-radius:10px;cursor:pointer;border:3px solid var(--card);
+    transition:.18s;position:relative;display:inline-flex;align-items:center;justify-content:center;
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--ink-3) 30%,transparent),0 1px 3px rgba(0,0,0,.08)}
+  .swatch:hover{transform:translateY(-1px)}
+  .swatch.on{border-color:var(--card);
+    box-shadow:0 0 0 2px var(--swatch-color,var(--mint)),0 0 0 6px color-mix(in srgb,var(--swatch-color,var(--mint)) 20%,transparent)}
+  .swatch.on::after{content:'✓';color:#fff;font-size:15px;font-weight:800;line-height:1;
+    text-shadow:0 1px 2px rgba(0,0,0,.28)}
+  .swatch-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+  .input{flex:1;max-width:340px;border:1px solid var(--line);background:var(--bg);color:var(--ink);
+    border-radius:10px;padding:10px 13px;font-size:13px;transition:.15s}
+  .input.bad{border-color:var(--prio-high)}
+  .input:focus{outline:none;border-color:var(--mint);box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 20%,transparent)}
+  .btn{border:none;border-radius:11px;padding:10px 18px;cursor:pointer;font-size:13px;font-weight:600;transition:.15s}
+  /* 主按钮扁平化：纯色底、无渐变无投影 */
+  .btn.accent{background:var(--mint);color:#fff;box-shadow:none}
+  .btn.accent:hover{background:var(--mint-deep)}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--ink-2)}
+  .btn.ghost:hover{border-color:var(--mint);color:var(--mint-deep)}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none!important}
+  .switch{width:44px;height:25px;border-radius:13px;background:var(--line);position:relative;cursor:pointer;transition:.2s}
+  .switch.on{background:var(--mint)}
+  .switch i{position:absolute;top:2.5px;left:2.5px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.2s;box-shadow:var(--shadow-sm)}
+  .switch.on i{left:21.5px}
+
+  /* ============ 编辑弹框（替代原抽屉） ============ */
+  .form-row{margin-bottom:18px}
+  .form-row>label{display:block;font-size:12px;color:var(--ink-3);margin-bottom:8px;font-weight:700}
+
+  /* ============ 右键菜单 ============ */
+  #ctx{position:fixed;background:var(--card);border:1px solid var(--line);border-radius:12px;
+    box-shadow:var(--shadow-lg);padding:7px;min-width:168px;display:none;z-index:50;animation:pop .12s ease}
+  @keyframes pop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
+  #ctx div{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;cursor:pointer;color:var(--ink-2);font-size:13px;transition:.12s}
+  #ctx div:hover{background:var(--mint-soft);color:var(--mint-deep)}
+  #ctx div.danger:hover{background:color-mix(in srgb,var(--prio-high) 14%,transparent);color:var(--prio-high)}
+  #ctx svg{width:16px;height:16px}
+  /* 右键菜单子菜单（优先级 / 改分类） */
+  #ctx .has-sub{position:relative;justify-content:flex-start}
+  #ctx .has-sub .caret{margin-left:auto;opacity:.45;transform:rotate(-90deg)}
+  #ctx .submenu{display:none;position:absolute;left:100%;top:-7px;margin-left:7px;background:var(--card);
+    border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow-lg);padding:7px;min-width:150px;z-index:2}
+  #ctx .has-sub.open>.submenu{display:block;animation:pop .12s ease}
+  #ctx .has-sub.open.left>.submenu{left:auto;right:100%;margin-left:0;margin-right:7px}
+  #ctx .submenu div{justify-content:flex-start;color:var(--ink-2)}
+  #ctx .submenu div:hover{background:var(--mint-soft);color:var(--mint-deep)}
+  #ctx .submenu .cat-dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+  #ctx .submenu .prio-dot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+  #ctx .submenu .cur{color:var(--mint-deep);font-weight:800}
+
+  /* ============ 弹窗 ============ */
+  .modal-mask{position:fixed;inset:0;background:rgba(10,20,18,.45);display:none;align-items:center;
+    justify-content:center;z-index:60;backdrop-filter:blur(3px)}
+  .modal-mask.show{display:flex;animation:fadeUp .2s both}
+  .modal{background:var(--card);border:1px solid var(--line);border-radius:18px;width:580px;max-width:94vw;
+    max-height:88vh;overflow-y:auto;box-shadow:var(--shadow-lg)}
+  .modal-head{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--line)}
+  .modal-head b{font-size:16px;display:flex;align-items:center;gap:10px}
+  .modal-body{padding:20px 22px}
+  .modal-foot{padding:15px 22px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:10px}
+  /* 操作弹框内容（替代原右侧抽屉） */
+  .cat-chips{display:flex;flex-wrap:wrap;gap:9px}
+  .hint{font-size:12px;color:var(--ink-3);margin-top:10px;line-height:1.5}
+  /* 添加分类：虚线胶囊按钮 */
+  .chip-add{border:1px dashed var(--ink-3);background:transparent;color:var(--ink-2);font-family:inherit;white-space:nowrap}
+  .chip-add:hover{border-color:var(--mint);color:var(--mint-deep);background:var(--mint-soft)}
+  .chip-add-plus{font-size:16px;line-height:1;font-weight:500;margin-right:1px}
+  /* 添加分类弹框：内容完整展示不滚动，自然弹出动画 */
+  .modal.cat-dialog{max-height:none;overflow:visible;animation:catDialogIn .24s cubic-bezier(.2,.8,.25,1) both}
+  @keyframes catDialogIn{from{opacity:0;transform:translateY(14px) scale(.94)}to{opacity:1;transform:none}}
+  .cat-dialog-desc{padding:14px 22px 0;margin:0;font-size:13px;color:var(--ink-3);line-height:1.6}
+  #catRows{display:flex;flex-direction:column;gap:12px;padding-top:16px}
+  .cat-edit-row{display:flex;align-items:center;gap:12px}
+  .cat-name-input{flex:0 0 118px;width:118px;border:1px solid var(--line);border-radius:9px;
+    padding:8px 10px;font-size:13px;font-family:inherit;color:var(--ink);background:var(--card);outline:none;transition:.15s}
+  .cat-name-input:focus{border-color:var(--mint);box-shadow:0 0 0 3px color-mix(in srgb,var(--mint) 15%,transparent)}
+  .cat-name-input::placeholder{color:var(--ink-3)}
+  /* 颜色选择器入口：默认只显示当前色圆点，点击才弹气泡 */
+  .cat-color-anchor{position:relative;flex:0 0 26px;width:26px;height:26px;display:flex;align-items:center;justify-content:center}
+  .cat-color-trigger{width:23px;height:23px;border-radius:50%;border:2px solid var(--card);cursor:pointer;padding:0;
+    transition:.15s;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink-3) 45%,transparent)}
+  .cat-color-trigger:hover{transform:scale(1.12);box-shadow:0 0 0 2px var(--mint)}
+  /* 颜色气泡：单项一行排开（8 色，由浅到深），不换行；间距紧凑整洁 */
+  .cat-palette{position:absolute;top:calc(100% + 8px);left:-6px;z-index:75;display:flex;flex-direction:row;
+    flex-wrap:nowrap;gap:8px;padding:10px 12px;background:var(--card);white-space:nowrap;
+    border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow-lg);animation:catPop .12s ease}
+  @keyframes catPop{from{opacity:0;transform:translateY(-4px) scale(.96)}to{opacity:1;transform:none}}
+  .cat-swatch{width:22px;height:22px;flex:0 0 22px;border-radius:50%;border:2px solid transparent;cursor:pointer;
+    padding:0;transition:.15s;box-shadow:0 0 0 1px color-mix(in srgb,var(--ink-3) 30%,transparent)}
+  .cat-swatch:hover{transform:scale(1.12)}
+  .cat-swatch.selected{border-color:var(--card);box-shadow:0 0 0 2px var(--ink)}
+  .cat-row-del{flex:0 0 26px;width:26px;height:26px;border-radius:8px;border:1px solid var(--line);
+    background:transparent;color:var(--ink-3);font-size:18px;line-height:1;cursor:pointer;transition:.15s}
+  .cat-row-del:hover{border-color:var(--prio-high);color:var(--prio-high)}
+  .cat-add-row{align-self:flex-start;border:1px dashed var(--line);background:transparent;color:var(--ink-2);
+    border-radius:9px;padding:8px 14px;font-size:13px;font-family:inherit;cursor:pointer;transition:.15s}
+  .cat-add-row:hover{border-color:var(--mint);color:var(--mint-deep)}
+  /* 内联新增子任务卡片：尺寸/缩进与同级子任务一致，仅内容区可编辑 */
+  .inline-sub{border:1px dashed var(--mint)!important;background:color-mix(in srgb,var(--mint-soft) 55%,var(--card));
+    box-shadow:0 8px 20px -10px color-mix(in srgb,var(--mint) 60%,transparent);
+    padding:12px 14px;animation:subIn .22s ease both}
+  .inline-sub:hover{border-color:var(--mint-deep)!important;box-shadow:0 10px 22px -10px color-mix(in srgb,var(--mint) 65%,transparent)}
+  @keyframes subIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+  .inline-sub-row{display:flex;align-items:center;gap:11px}
+  .inline-sub-dot{width:23px;height:23px;flex:0 0 23px;border-radius:50%;border:2px solid var(--ink-3);background:var(--card)}  /* 实色边框，与真实勾选圈一致 23px */
+  .inline-sub-input{flex:1;min-width:0;border:none;background:transparent;outline:none;color:var(--ink);
+    font-size:14px;font-family:inherit;line-height:22px}
+  .inline-sub-input::placeholder{color:var(--ink-3)}
+  .inline-sub .act{width:24px;height:24px;border-radius:8px;flex:0 0 24px}
+  .inline-sub-hint{margin:6px 0 0 30px;font-size:11px;color:var(--ink-3);line-height:1.4}
+
+  /* ============ Toast ============ */
+  #toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;
+    background:var(--ink);color:var(--bg);padding:12px 22px;border-radius:24px;font-size:13px;
+    z-index:70;transition:.25s;pointer-events:none;box-shadow:var(--shadow-lg);font-weight:500}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  /* 顶栏单行自适应：空间变窄时逐级精简「信息量」，而不是让 tab 折行或被裁切 */
+  @media(max-width:1020px){
+    .sync-status .txt{display:none}
+  }
+  @media(max-width:860px){
+    .brand small{display:none}
+    .tb-nav button span.lbl{display:none}
+    .tb-nav button{padding:0 11px}
+    .tb-dp-date{display:none}
+    .tb-dp-sep{display:none}
+    .tb-pill{padding:0 10px;gap:6px}
+    .tb-pills{gap:8px}
+  }
+  @media(max-width:820px){
+    .cal-layout{flex-direction:column;gap:16px}
+    .cal-panel{flex:0 0 auto;max-width:none;width:100%}
+    /* 覆盖 align-items:flex-start，窄窗下已完成卡片撑满可用宽度 */
+    .cal-daylist{max-height:none;overflow:visible;width:100%;align-self:stretch}
+    .cal-cell .d{font-size:13px}
+  }
+  @media(max-width:768px){
+    .cal-daylist .task{padding:9px 11px}
+    .cal-daylist .task-row{gap:10px}
+    .cal-daylist .side-cat{display:none}   /* 窄屏收起分类标签，为标题腾出空间 */
+  }
+  @media(max-width:768px){
+    :root{--heat-cell:12px;--heat-gap:4px}
+    .tb-inner{padding:0 18px;gap:12px}
+    .stat-grid{grid-template-columns:1fr}
+    .page{padding:26px 18px 40px}
+    .page-today{padding-bottom:104px}
+    .page h1{font-size:24px}
+    .filter-sticky,.range-sticky{margin-inline:-18px;padding-inline:18px}
+    .task{padding:10px 12px}
+    .subtasks{margin-left:28px}
+    .subtasks .subtasks{margin-left:28px}
+    .subtask{padding:9px 12px}
+    .cal-grid{gap:6px}
+    .cal-cell{padding:8px;border-radius:11px}
+    .cal-cell .d{font-size:12px}
+    .range-tabs{flex-wrap:wrap}
+    .qa-bar{width:calc(100% - 36px)}
+  }
+  @media(max-width:420px){
+    .tb-inner{padding:0 14px;gap:8px}
+    .tb-nav{gap:4px}
+    .tb-nav button{padding:0 9px}
+    .page{padding:22px 14px 40px}
+    .page-today{padding-bottom:108px}
+    .filter-sticky,.range-sticky{margin-inline:-14px;padding-inline:14px}
+    .task{padding:9px 11px}
+    .subtask{padding:8px 11px}
+    .task-row{gap:11px}
+    .subtasks{margin-left:22px}
+    .subtasks .subtasks{margin-left:22px}
+    .qa-bar{width:calc(100% - 28px);padding:9px 11px;gap:8px}
+  }
+  /* 极窄屏：继续压缩间距而不是折行，保证 logo / tab / 胶囊始终同一行 */
+  @media(max-width:360px){
+    .tb-inner{gap:6px}
+    .brand b{display:none}
+    .tb-nav{gap:2px}
+    .tb-nav button{padding:0 8px}
+    .tb-pills{gap:6px}
+    .tb-pill{padding:0 8px}
+  }
+  /* ==================================================================
+     doit-gpui 设计层：组件映射标注 + 设计说明抽屉（默认隐藏，不干扰原型）
+     全部复用 doit-desktop 的设计令牌，自动跟随亮/暗主题
+     ================================================================== */
+  .g-fab{position:fixed;right:22px;bottom:22px;z-index:84;display:flex;flex-direction:column;gap:10px}
+  .g-fab-btn{width:46px;height:46px;border-radius:14px;border:1px solid color-mix(in srgb,var(--mint) 35%,var(--line));
+    background:linear-gradient(145deg,var(--card),color-mix(in srgb,var(--mint-soft) 55%,var(--card)));
+    color:var(--mint-deep);display:flex;align-items:center;justify-content:center;cursor:pointer;
+    box-shadow:0 8px 24px rgba(20,50,40,.16);transition:transform .18s,box-shadow .18s,background .18s}
+  .g-fab-btn svg{width:21px;height:21px}
+  .g-fab-btn:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(20,50,40,.22)}
+  .g-fab-btn.on{background:linear-gradient(145deg,var(--mint),var(--mint-deep));color:#fff;border-color:transparent}
+  .g-fab-btn .g-dot{position:absolute;top:8px;right:8px;width:7px;height:7px;border-radius:50%;background:#DE5B55;border:2px solid var(--card)}
+  .g-fab-btn{position:relative}
+
+  .g-backdrop{position:fixed;inset:0;background:rgba(10,20,18,.42);z-index:119;opacity:0;pointer-events:none;transition:opacity .28s}
+  .g-backdrop.show{opacity:1;pointer-events:auto}
+  .g-drawer{position:fixed;top:0;right:0;height:100vh;width:min(520px,92vw);z-index:120;
+    background:var(--card);color:var(--ink);box-shadow:-18px 0 50px rgba(18,46,38,.22);
+    transform:translateX(102%);transition:transform .34s cubic-bezier(.22,.7,.25,1);display:flex;flex-direction:column}
+  .g-drawer.show{transform:translateX(0)}
+  .g-drawer-head{padding:22px 24px 16px;border-bottom:1px solid var(--line);position:relative;flex:0 0 auto}
+  .g-drawer-head .g-eyebrow{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:800;letter-spacing:.06em;
+    color:var(--mint-deep);background:var(--mint-soft);padding:5px 11px;border-radius:20px}
+  .g-drawer-head h2{font-size:23px;font-weight:800;margin:12px 0 5px;letter-spacing:-.01em}
+  .g-drawer-head p{font-size:12.5px;color:var(--ink-2);line-height:1.6}
+  .g-drawer-close{position:absolute;top:20px;right:20px;width:32px;height:32px;border-radius:9px;border:1px solid var(--line);
+    background:var(--card);color:var(--ink-2);cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .g-drawer-close svg{width:16px;height:16px}
+  .g-tabs{display:flex;gap:4px;padding:14px 24px 0;border-bottom:1px solid var(--line);flex:0 0 auto}
+  .g-tab{appearance:none;border:none;background:transparent;color:var(--ink-2);font-size:13px;font-weight:600;
+    padding:9px 14px;border-radius:10px 10px 0 0;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .g-tab.active{color:var(--mint-deep);border-bottom-color:var(--mint);background:color-mix(in srgb,var(--mint-soft) 60%,transparent)}
+  .g-drawer-body{padding:20px 24px 40px;overflow-y:auto;flex:1 1 auto}
+  .g-pane{display:none;animation:gFade .3s ease}
+  .g-pane.active{display:block}
+  @keyframes gFade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .g-sec{margin-bottom:22px}
+  .g-sec h4{font-size:12px;font-weight:800;color:var(--ink-3);letter-spacing:.05em;margin-bottom:11px;
+    display:flex;align-items:center;gap:8px}
+  .g-sec h4::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--mint)}
+  .g-card{background:color-mix(in srgb,var(--mint-soft) 40%,var(--card));border:1px solid var(--line);
+    border-radius:13px;padding:14px 15px;margin-bottom:10px}
+  .g-card b{font-size:13.5px}
+  .g-card p{font-size:12.5px;color:var(--ink-2);line-height:1.65;margin-top:5px}
+  .g-kv{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
+  .g-kv:last-child{border-bottom:none}
+  .g-kv .k{color:var(--ink-3);flex:0 0 auto}
+  .g-kv .v{color:var(--ink);text-align:right;font-weight:600}
+  .g-map{width:100%;border-collapse:collapse;font-size:12px}
+  .g-map th{text-align:left;color:var(--ink-3);font-weight:700;font-size:11px;letter-spacing:.03em;
+    padding:7px 8px;border-bottom:1px solid var(--line)}
+  .g-map td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.45}
+  .g-map td.src{color:var(--ink);font-weight:600}
+  .g-map td.tgt{color:var(--mint-deep);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+  .g-pill{display:inline-block;font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:7px;white-space:nowrap}
+  .g-pill.ok{color:#1E7D66;background:#E8F7F1}
+  .g-pill.custom{color:#B5651A;background:#FFF1E0}
+  .g-pill.limited{color:#C0392B;background:#FCEAEA}
+  [data-theme="dark"] .g-pill.ok{color:#7FE3C8;background:#16302A}
+  [data-theme="dark"] .g-pill.custom{color:#FFA468;background:#3A2A18}
+  [data-theme="dark"] .g-pill.limited{color:#FF8A85;background:#3A1E1E}
+  .g-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--ink-2);margin-bottom:14px}
+  .g-legend span{display:inline-flex;align-items:center;gap:6px}
+  .g-legend i{width:9px;height:9px;border-radius:3px;display:inline-block}
+  .g-note{font-size:11.5px;color:var(--ink-3);line-height:1.6;margin-top:8px}
+  .g-route{display:flex;gap:8px;align-items:flex-start;margin-bottom:11px}
+  .g-route .n{flex:0 0 24px;height:24px;border-radius:8px;background:var(--mint);color:#fff;font-weight:800;font-size:12px;
+    display:flex;align-items:center;justify-content:center}
+  .g-route .t{font-size:12.5px;line-height:1.55}
+  .g-route .t b{color:var(--ink)}
+  .g-route .t span{color:var(--ink-2)}
+  .g-bar{height:7px;border-radius:5px;background:var(--line);overflow:hidden;margin-top:7px}
+  .g-bar i{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,var(--mint),var(--mint-deep))}
+
+  /* 组件映射标注覆盖层：pointer-events:none，纯视觉，不干扰原型交互 */
+  .g-overlay{position:fixed;inset:0;z-index:82;pointer-events:none;opacity:0;transition:opacity .25s}
+  body.g-map-on .g-overlay{opacity:1}
+  .g-tag{position:absolute;box-sizing:border-box;border-radius:9px;border:1.5px dashed var(--mint);
+    background:color-mix(in srgb,var(--mint) 7%,transparent);transition:opacity .2s}
+  .g-tag.custom{border-color:#E08A34;background:color-mix(in srgb,#E08A34 8%,transparent)}
+  .g-tag.limited{border-color:#DE5B55;background:color-mix(in srgb,#DE5B55 8%,transparent)}
+  .g-tag .lbl{position:absolute;left:-1.5px;top:-24px;white-space:nowrap;font-size:10.5px;font-weight:800;
+    color:#fff;background:var(--mint);padding:3px 8px;border-radius:6px 6px 6px 0;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+  .g-tag.custom .lbl{background:#E08A34}
+  .g-tag.limited .lbl{background:#DE5B55}
+  .g-map-hint{position:fixed;left:50%;top:70px;transform:translateX(-50%);z-index:83;pointer-events:none;
+    background:var(--ink);color:var(--bg);font-size:12px;font-weight:600;padding:8px 16px;border-radius:20px;
+    opacity:0;transition:opacity .25s;box-shadow:0 6px 18px rgba(0,0,0,.2)}
+  body.g-map-on .g-map-hint{opacity:.94}
+</style>
+</head>
+<body>
+  <!-- ============ 顶部玻璃导航（logo / tab / 状态胶囊 全部同一行） ============ -->
+  <header id="topbar"><div class="tb-inner" id="tbInner"></div></header>
+
+  <!-- ============ 主区 ============ -->
+  <main id="main"></main>
+
+  <!-- ============ 底部固定输入层（独立于滚动区，始终吸附视口底部） ============ -->
+  <div id="qabar-layer"></div>
+
+  <!-- ============ 右键菜单 / 确认弹窗（编辑、优先级等均不弹框） ============ -->
+  <div id="ctx"></div>
+  <div class="modal-mask" id="delModal">
+    <div class="modal" style="width:410px">
+      <div class="modal-head"><b>删除确认</b><span class="act" data-action="del-no" style="opacity:1"><span id="xicon2"></span></span></div>
+      <div class="modal-body" id="delBody"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-action="del-no">取消</button>
+        <button class="btn accent" data-action="del-yes" style="background:var(--prio-high)">删除</button>
+      </div>
+    </div>
+  </div>
+  <!-- ============ 添加分类弹框（可一次添加多个 + 色板选色，保存后生效） ============ -->
+  <div class="modal-mask" id="catModal">
+    <div class="modal cat-dialog" style="width:560px">
+      <div class="modal-head"><b>添加分类</b><span class="act" data-action="cat-close" style="opacity:1"><span id="xiconCat"></span></span></div>
+      <p class="cat-dialog-desc">可一次添加多个分类，点击色块设置颜色，保存后生效。</p>
+      <div class="modal-body" id="catRows"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-action="cat-close">取消</button>
+        <button class="btn accent" data-action="cat-save">保存</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast"></div>
+  <div id="chartTip" class="chart-tip" role="tooltip" aria-hidden="true"></div>
+
+  <!-- ============ doit-gpui 设计层：组件映射标注 + 设计说明抽屉 ============ -->
+  <div class="g-map-hint">组件映射标注已开启 · 虚线框标注各处对应的 GPUI Kit 组件</div>
+  <div class="g-overlay" id="gOverlay"></div>
+
+  <div class="g-fab">
+    <button class="g-fab-btn" id="gMapBtn" data-g="map" title="组件映射标注">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3H4a1 1 0 00-1 1v5M15 3h5a1 1 0 011 1v5M9 21H4a1 1 0 01-1-1v-5M15 21h5a1 1 0 001-1v-5"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+    </button>
+    <button class="g-fab-btn" data-g="drawer" title="设计说明">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+
+  <div class="g-backdrop" id="gBackdrop"></div>
+  <aside class="g-drawer" id="gDrawer" aria-label="doit-gpui 设计说明">
+    <div class="g-drawer-head">
+      <span class="g-eyebrow">GPUI KIT · 纯原生复刻</span>
+      <h2>doit-gpui 设计方案</h2>
+      <p>用 Rust + GPUI Kit 复刻 doit-desktop，视觉与交互 1:1 对齐，交付无 WebView 的纯原生体验。</p>
+      <button class="g-drawer-close" data-g="drawer-close" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="g-tabs">
+      <button class="g-tab active" data-gtab="overview">概述</button>
+      <button class="g-tab" data-gtab="map">组件映射</button>
+      <button class="g-tab" data-gtab="ability">能做到</button>
+      <button class="g-tab" data-gtab="plan">路线图</button>
+    </div>
+    <div class="g-drawer-body">
+
+      <!-- 概述 -->
+      <div class="g-pane active" data-gpane="overview">
+        <div class="g-sec">
+          <h4>项目定位</h4>
+          <div class="g-card">
+            <b>doit-gpui 是什么</b>
+            <p>doit 桌面的<strong>纯原生</strong>实现：以 <b>gpui-kit</b>（长桥开源、Zed GPUI 之上的 75+ 组件库，Apache-2.0，Longbridge Pro 商用验证）为 UI 底座，1:1 复刻现有 Tauri + Vue 版 doit-desktop 的全部界面、交互与数据契约。目标是一个不依赖 Chromium、单文件小体积、120 FPS 的桌面待办客户端。</p>
+          </div>
+          <div class="g-kv"><span class="k">UI 底座</span><span class="v">gpui-kit 0.10 · GPUI</span></div>
+          <div class="g-kv"><span class="k">语言 / 构建</span><span class="v">Rust · Cargo</span></div>
+          <div class="g-kv"><span class="k">目标平台</span><span class="v">macOS / Windows / Linux</span></div>
+          <div class="g-kv"><span class="k">数据契约</span><span class="v">Snapshot v2（与手机/桌面共用）</span></div>
+          <div class="g-kv"><span class="k">视觉基准</span><span class="v">本原型（doit-desktop 1:1）</span></div>
+        </div>
+        <div class="g-sec">
+          <h4>为什么选择 gpui-kit</h4>
+          <div class="g-card">
+            <b>原生渲染，去掉浏览器内核</b>
+            <p>GPU 加速、原生手感、无 WebView 体积与内存开销；组件源自 shadcn 设计语言，与 doit 现有的圆角/令牌/浅色薄荷 + 深夜青灰审美高度契合。自带 Theme 系统（20+ 内置主题、亮暗切换、运行时换色）、图表、右键菜单、日历、虚拟列表、Dialog/Toast 等，覆盖桌面端绝大多数需求。</p>
+          </div>
+          <div class="g-card">
+            <b>风险与边界（诚实说明）</b>
+            <p>① 无现成「热力图」组件，需自绘或用 BarChart 变通；② Vue→Rust 交互逻辑需重写（长按完成、父子树推导、三方合并）；③ gpui-kit 生态较年轻，文档与问答少于 Electron；④ 需 Rust 工具链与平台依赖。详见「能做到」与「路线图」页。</p>
+          </div>
+        </div>
+        <div class="g-sec">
+          <h4>视觉还原度（本原型即验收基准）</h4>
+          <div class="g-note">令牌、圆角、间距、阴影、字号、亮暗主题均直接取自 doit-desktop 的 tokens.css / prototype.css，因此渲染目标与本原型肉眼一致。</div>
+          <div class="g-bar"><i style="width:96%"></i></div>
+          <div class="g-note">设计层标注 ≈96% 视觉一致（图表为 GPUI 原生绘制，观感略有差异但配色/布局一致）。</div>
+        </div>
+      </div>
+
+      <!-- 组件映射 -->
+      <div class="g-pane" data-gpane="map">
+        <div class="g-legend">
+          <span><i style="background:#3FBB9C"></i> 原生组件直接实现</span>
+          <span><i style="background:#E08A34"></i> 基础原语 + 自绘样式</span>
+          <span><i style="background:#DE5B55"></i> 无对应 / 需变通</span>
+        </div>
+        <div class="g-sec">
+          <h4>界面区域 → GPUI Kit 组件</h4>
+          <table class="g-map">
+            <thead><tr><th>doit-desktop 区域</th><th>GPUI Kit 实现</th><th>方式</th></tr></thead>
+            <tbody>
+              <tr><td class="src">顶栏 / 导航 Tab / 胶囊</td><td class="tgt">Toolbar · Tabs · Badge</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">分类筛选胶囊条</td><td class="tgt">Scrollable · Button</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">任务卡片 / 子任务树</td><td class="tgt">List · VirtualList · div</td><td><span class="g-pill custom">自绘样式</span></td></tr>
+              <tr><td class="src">勾选圈 / 长按填充</td><td class="tgt">SvgElement · 手势/定时器</td><td><span class="g-pill custom">自绘交互</span></td></tr>
+              <tr><td class="src">优先级 / 分类标签</td><td class="tgt">Tag · Badge</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">子任务进度环 / 顶栏环</td><td class="tgt">svg circle（自绘）</td><td><span class="g-pill custom">自绘</span></td></tr>
+              <tr><td class="src">右键菜单 / 二级子菜单</td><td class="tgt">Menu（context menu）</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">底部快速添加栏</td><td class="tgt">Input · Popover · Dropdown</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">删除 / 分类管理弹框</td><td class="tgt">Dialog · Modal</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">主题切换 / 进度色</td><td class="tgt">Theme · ActiveTheme · Registry</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">开关 / 分段选择 / 表单</td><td class="tgt">Switch · RadioGroup · Form</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">完成热力图</td><td class="tgt">自绘网格 / BarChart 变通</td><td><span class="g-pill limited">无对应</span></td></tr>
+              <tr><td class="src">分类占比环图</td><td class="tgt">PieChart（inner radius）</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">完成趋势折线图</td><td class="tgt">LineChart / AreaChart</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">月历 / 当日完成列表</td><td class="tgt">Calendar · List</td><td><span class="g-pill ok">原生</span></td></tr>
+              <tr><td class="src">Toast / Tooltip</td><td class="tgt">Notification · Tooltip</td><td><span class="g-pill ok">原生</span></td></tr>
+            </tbody>
+          </table>
+          <div class="g-note">点击左下角「组件映射标注」按钮，可在真实界面上看到以上对应关系的可视化虚线框。</div>
+        </div>
+      </div>
+
+      <!-- 能做到 -->
+      <div class="g-pane" data-gpane="ability">
+        <div class="g-sec">
+          <h4>可 1:1 复刻</h4>
+          <div class="g-card"><p>✓ 亮/暗主题与薄荷绿审美、圆角/阴影/字号全部令牌级还原（Theme 运行时换色）<br>
+            ✓ 今日页：分类胶囊、任务卡、父子层级、子任务进度环、展开收起<br>
+            ✓ 快速添加、原地编辑、右键菜单（编辑/子任务/优先级/分类/删除）、删除确认<br>
+            ✓ 长按完成动效（自绘填充）、单向完成、父任务由子任务推导<br>
+            ✓ 统计页环图、趋势折线图、月历页、设置页（开关/分段/色板/输入）<br>
+            ✓ Toast、Tooltip、窗口最小化到托盘、单实例、开机自启</p></div>
+        </div>
+        <div class="g-sec">
+          <h4>需变通实现（效果接近）</h4>
+          <div class="g-card"><p><b>完成热力图</b> — gpui-kit 图表无 Heatmap。方案 A：用 SvgElement/Canvas 自绘方格（推荐，灵活可控）；方案 B：用 BarChart 堆叠模拟。配色沿用 5 档 heat 令牌。<br><br>
+            <b>环形进度 / 勾选圈</b> — 用 SVG circle + stroke-dasharray 自绘，视觉与现有一致。<br><br>
+            <b>玻璃拟态顶栏</b> — GPUI 无 CSS backdrop-filter，用半透明纯色 + 顶栏阴影近似，肉眼差异很小。</p></div>
+        </div>
+        <div class="g-sec">
+          <h4>需自行移植的核心逻辑</h4>
+          <div class="g-card"><p>• 任务树操作、recalcUp 父子联动、今日可见性口径（纯 Rust 领域层重写，可复用 TS 逻辑设计）<br>
+            • Snapshot v2 快照读写（原子写 + .bak.1~3 轮转）<br>
+            • WebDAV 三方合并 LWW、墓碑传播、系统钥匙串存凭据<br>
+            • GitHub Releases 更新检查、快捷键、窗口状态记忆</p></div>
+        </div>
+        <div class="g-sec">
+          <h4>暂不做（明确范围外）</h4>
+          <div class="g-card"><p>拖拽排序、搜索在 doit-desktop 中本就未实现，复刻版保持对齐，不额外新增；JS 扩展运行时（gpui-shell）非必需，暂不引入。</p></div>
+        </div>
+      </div>
+
+      <!-- 路线图 -->
+      <div class="g-pane" data-gpane="plan">
+        <div class="g-sec">
+          <h4>交付路线图（一次性成型）</h4>
+          <div class="g-route"><div class="n">1</div><div class="t"><b>骨架与设计系统</b><br><span>Cargo 工程、gpui-kit 初始化、把 tokens.css 全量翻译成 Theme 配置（亮/暗两套），跑通窗口与顶栏。</span></div></div>
+          <div class="g-route"><div class="n">2</div><div class="t"><b>领域层与持久化</b><br><span>Rust 重写 types/taskTree/snapshot，原子写 + 备份轮转，先把数据层做稳。</span></div></div>
+          <div class="g-route"><div class="n">3</div><div class="t"><b>今日页与核心交互</b><br><span>任务卡/子任务树、勾选与长按完成、右键菜单、原地编辑、快速添加——复刻 80% 体验。</span></div></div>
+          <div class="g-route"><div class="n">4</div><div class="t"><b>统计 / 日历 / 设置</b><br><span>原生图表 + 自绘热力图、月历、设置面板与主题切换，完成全页面。</span></div></div>
+          <div class="g-route"><div class="n">5</div><div class="t"><b>系统集成与同步</b><br><span>托盘/单实例/自启/窗口状态、WebDAV 三方合并、更新检查、通知。</span></div></div>
+          <div class="g-route"><div class="n">6</div><div class="t"><b>测试与发版</b><br><span>gpui-kit UI 集成测试 + 领域单测，三平台 CI 打包，版本号与 doit 家族统一。</span></div></div>
+        </div>
+        <div class="g-sec">
+          <h4>前置条件与风险</h4>
+          <div class="g-card"><p>需本机 Rust 工具链与各平台系统依赖（macOS 已内置 font-kit 支持）。GPUI 生态年轻，个别组件细节可能需要读源码或自绘——已在「能做到」页逐项标注变通方案，无不可逾越障碍。</p></div>
+          <div class="g-note">本原型为设计方案的可交互演示，最终以 Rust + gpui-kit 实现为准；视觉以本原型为 1:1 验收基准。</div>
+        </div>
+      </div>
+
+    </div>
+  </aside>
+
+<script>
+/* =====================================================================
+ *  doit-gpui 产品原型 = doit-desktop 的 1:1 视觉/交互基准
+ *  本文件用 HTML 高保真还原「GPUI Kit 原生复刻版 doit」的目标效果。
+ *  视觉 / 交互 / 数据模型完全对齐 doit-desktop（Tauri+Vue 版），
+ *  作为 Rust + gpui-kit 实现的验收基准与设计方案的可交互演示。
+ *  —— 纯前端 mock，同步为模拟流程，file:// 直接打开即可体验。
+ * ===================================================================== */
+const I = {
+  today:'<path d="M3 5h18v14H3z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 9h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="1.6"/>',
+  stats:'<path d="M4 20V10M10 20V4M16 20v-7M22 20H2" stroke="currentColor" stroke-width="1.6" fill="none"/>',
+  calendar:'<rect x="3" y="4" width="18" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3 9h18M8 2v4M16 2v4" stroke="currentColor" stroke-width="1.6"/>',
+  settings:'<circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" stroke="currentColor" stroke-width="1.6"/>',
+  plus:'<path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+  check:'<path d="M5.5 12.8l4.2 4.2L18.5 7.5" stroke="currentColor" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  pencil:'<path d="M4 20l4-1 11-11-3-3L5 16z" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+  flag:'<path d="M6 21V4h11l-2 4 2 4H6" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+  folder:'<path d="M3 7h6l2 2h10v10H3z" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+  sub:'<path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" stroke="currentColor" stroke-width="1.6"/>',
+  trash:'<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+  cloud:'<path d="M7 18a4 4 0 010-8 5 5 0 019-2 4 4 0 011 10H7z" fill="none" stroke="currentColor" stroke-width="1.6"/>',
+  // 已与远程同步：云中间带对钩；有本地更改待同步：云中间改为上传箭头
+  cloudOk:'<path d="M7 18a4 4 0 010-8 5 5 0 019-2 4 4 0 011 10H7z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9.4 13.2l2.2 2.2 4.3-4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  cloudDirty:'<path d="M7 18a4 4 0 010-8 5 5 0 019-2 4 4 0 011 10H7z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.4 15.9V10.5M10.1 12.8l2.3-2.3 2.3 2.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  sync:'<path d="M4 12a8 8 0 0114-5l2 2M20 12a8 8 0 01-14 5l-2-2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M18 5v4h-4M6 19v-4h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/>',
+  close:'<path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  chevron:'<path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  // 父任务只读虚线圈：SVG stroke-dasharray 画虚线圆，跨平台（WebKit/Blink）均匀一致
+  dashRing:'<circle cx="12" cy="12" r="10.8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-dasharray="4 3" stroke-linecap="round"/>'
+};
+function svg(name,cls){ return '<svg class="'+(cls||'')+'" viewBox="0 0 24 24">'+(I[name]||'')+'</svg>'; }
+
+/* ---------- 日期 ---------- */
+const TODAY = new Date(2026,10,14);
+function dk(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function addDays(d,n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
+function sameDay(a,b){ return a&&b&&dk(a)===dk(b); }
+function fmtMD(d){ return (d.getMonth()+1)+'月'+d.getDate()+'日'; }
+
+/* ---------- 确定性完成日志 ---------- */
+function mulberry32(a){ return function(){ a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296; }; }
+const rng = mulberry32(20261114);
+const doneByDay = {};
+for(let i=0;i<365;i++){ const d=addDays(TODAY,-i); const dow=d.getDay();
+  let base=Math.floor(rng()*4); if(dow===0||dow===6) base=Math.floor(base/2);
+  if(rng()<0.06) base+=Math.floor(rng()*8); doneByDay[dk(d)]=base; }
+
+/* ---------- 分类 / 任务 mock ---------- */
+const categories=[{name:'工作',color:'#3FBB9C'},{name:'生活',color:'#5B8DEF'},{name:'学习',color:'#F2A65A'},{name:'采购',color:'#C77DFF'}];
+const PROG_COLORS=[{name:'薄荷绿',v:'#3FBB9C'},{name:'海蓝',v:'#4A90D9'},{name:'暖橙',v:'#F2A65A'},{name:'紫罗兰',v:'#9B6DD6'},{name:'玫红',v:'#E5688A'}];
+function applyProgressColor(){
+  // 同时写入 html 与 body：body 上的 [data-theme="dark"] 规则也定义了 --done-anim，
+  // 用 inline 变量覆盖，保证设置页选中的进度颜色在浅色 / 深色主题下都生效
+  document.documentElement.style.setProperty('--done-anim',state.progressColor);
+  document.body.style.setProperty('--done-anim',state.progressColor);
+}
+let UID=100;
+function mk(o){ return Object.assign({uid:'u'+(UID++),parentUid:null,title:'',category:'',priority:0,
+  done:false,completedAt:null,createdAt:Date.now(),updatedAt:Date.now(),deletedAt:null,depth:0,sortOrder:0},o); }
+const tasks=[
+  mk({uid:'t1',title:'完成 Q4 季度复盘报告',category:'工作',priority:2,done:false,depth:0,sortOrder:0,
+    subs:[mk({uid:'t1a',parentUid:'t1',title:'收集各部门数据',done:true,completedAt:addDays(TODAY,-2)}),
+      mk({uid:'t1b',parentUid:'t1',title:'撰写执行摘要',done:false,
+        subs:[mk({uid:'t1b1',parentUid:'t1b',title:'列出核心要点',done:false}),
+          mk({uid:'t1b2',parentUid:'t1b',title:'起草段落',done:false})]}),
+      mk({uid:'t1c',parentUid:'t1',title:'制作汇报 PPT',done:false})]}),
+  mk({uid:'t2',title:'预约周末体检',category:'生活',priority:1,done:true,completedAt:TODAY}),
+  mk({uid:'t3',title:'读完《设计心理学》第 3 章',category:'学习',priority:1,done:false,
+    subs:[mk({uid:'t3a',parentUid:'t3',title:'做章节笔记',done:false})]}),
+  mk({uid:'t4',title:'采购冬季保暖用品',category:'采购',priority:0,done:false,
+    subs:[mk({uid:'t4a',parentUid:'t4',title:'羽绒服',done:false}),
+      mk({uid:'t4b',parentUid:'t4',title:'暖手宝',done:false}),
+      mk({uid:'t4c',parentUid:'t4',title:'厚袜子',done:false})]}),
+  mk({uid:'t5',title:'给妈妈回电话',category:'生活',priority:2,done:false}),
+  mk({uid:'t6',title:'准备技术分享：WebDAV 同步原理',category:'工作',priority:1,done:true,completedAt:addDays(TODAY,-1),
+    subs:[mk({uid:'t6a',parentUid:'t6',title:'画流程图',done:true,completedAt:addDays(TODAY,-1)}),
+      mk({uid:'t6b',parentUid:'t6',title:'写讲稿',done:true,completedAt:addDays(TODAY,-1)})]})
+];
+const flat=[]; (function walk(arr){ arr.forEach(t=>{ flat.push(t); if(t.subs) walk(t.subs); }); })(tasks);
+function findTask(id){ return flat.find(t=>t.uid===id); }
+
+/* ---------- 状态 ---------- */
+const state={ page:'today', filter:'all', collapsed:{},
+  theme:'light', skin:'mint', progressColor:'#3FBB9C',
+  inlineSubFor:null, inlineSubDraft:'',
+  inlineEditFor:null, inlineEditDraft:'',
+  confirmDelete:null, sync:{text:'上次同步 · 刚刚 · 合并 0 条 · v12',spinning:false,on:true,
+    url:'https://dav.example.com/doit/',user:'doit',pass:''},
+  range:'month', calMonth:new Date(TODAY.getFullYear(),TODAY.getMonth(),1), calSel:dk(TODAY) };
+
+/* ---------- 与远程的同步状态：用业务数据指纹判定是否已对齐 ----------
+ * 快照只含 tasks / categories；主题、筛选、折叠、WebDAV 配置等 UI 状态不算「更改」
+ * 任何任务增删改 → 指纹变化 → 未同步；手动同步 / 保存并同步 → 重置基线 → 已同步
+ */
+function dataFingerprint(){ return JSON.stringify({tasks:tasks,categories:categories}); }
+let syncBaseline=null;                       // 上次成功同步时的数据快照
+function markSynced(){ syncBaseline=dataFingerprint(); }
+markSynced();                                // 原型初始状态 = 刚刚同步完
+function hasUnsyncedChanges(){ return syncBaseline===null||dataFingerprint()!==syncBaseline; }
+function syncStatus(){
+  const ss=state.sync;
+  if(ss.spinning) return {cls:'syncing',icon:'cloud',label:'同步中…',tip:'正在与远程同步…'};
+  if(!ss.on)      return {cls:'off',icon:'cloud',label:'同步已关闭',tip:'同步已关闭 · 可在设置中开启'};
+  if(hasUnsyncedChanges())
+    return {cls:'dirty',icon:'cloudDirty',label:'有未同步更改 · 点击同步',tip:'有本地更改尚未同步 · 点击立即同步（'+ss.text+'）'};
+  return {cls:'synced',icon:'cloudOk',label:ss.text,tip:'已与远程同步 · 点击立即同步'};
+}
+
+/* ---------- 底部快速添加所选分类（自定义下拉） ---------- */
+let qaSelCat=''; let qaPrio=0;
+function catColorOf(name){ const c=categories.find(c=>c.name===name); return c?c.color:'transparent'; }
+
+/* ---------- 派生 ---------- */
+function showInToday(t){ if(t.deletedAt)return false;
+  if(state.filter!=='all'&&t.category!==state.filter)return false;
+  return !t.done||sameDay(t.completedAt,TODAY); }
+function todayTotal(){ return tasks.filter(showInToday).length; }
+function todayDone(){ return tasks.filter(showInToday).filter(t=>t.done).length; }
+function remaining(){ return todayTotal()-todayDone(); }
+/* 有效子任务（排除墓碑）：父任务的完成态与进度一律以它为准 */
+function liveSubs(t){ return (t.subs||[]).filter(s=>!s.deletedAt); }
+function hasLiveSubs(t){ return liveSubs(t).length>0; }
+function subLeaves(t){ let total=0,done=0;
+  liveSubs(t).forEach(s=>{ if(hasLiveSubs(s)){const r=subLeaves(s);total+=r.total;done+=r.done;}
+    else{total++;if(s.done)done++;} });
+  return {total,done}; }
+function subProgress(t){ if(!hasLiveSubs(t))return null;
+  const r=subLeaves(t); return {done:r.done,total:r.total,pct:r.total?Math.round(r.done/r.total*100):0}; }
+/* 子任务变化后自底向上重算：含子任务的父任务 done = 全部有效子任务完成 */
+function recalcUp(id){ let cur=findTask(id);
+  while(cur&&cur.parentUid){ const p=findTask(cur.parentUid); if(!p)break;
+    const kids=liveSubs(p);
+    if(kids.length){ const all=kids.every(s=>s.done); p.done=all; p.completedAt=all?TODAY:null; }
+    cur=p; } }
+function catCount(name){ return tasks.filter(t=>t.category===name&&!t.deletedAt).length; }
+
+/* ---------- 渲染：顶部玻璃栏（logo / tab / 状态胶囊 全部同一行） ---------- */
+function renderTopbar(){
+  const ss=state.sync, st=syncStatus();
+  const WD=['日','一','二','三','四','五','六'];
+  const td=todayDone(),tt=todayTotal();
+  const item=(id,icon,label)=>`<button class="${state.page===id?'active':''}" data-action="nav" data-page="${id}">${svg(icon)}<span class="lbl">${label}</span></button>`;
+  document.getElementById('tbInner').innerHTML=`
+    <div class="brand"><div class="logo">d</div><div><b>doit</b><small>桌面端原型</small></div></div>
+    <nav class="tb-nav">
+      ${item('today','today','今日')}${item('stats','stats','统计')}${item('calendar','calendar','月历')}${item('settings','settings','设置')}
+    </nav>
+    <div class="tb-pills">
+      <div class="tb-pill sync-status clickable ${st.cls} ${ss.spinning?'spin':''}" data-action="sync-now" title="${st.tip}">
+        <span class="cloud">${svg(st.icon)}</span><span class="txt">${st.label}</span>${ss.spinning?svg('sync'):''}
+      </div>
+      <div class="tb-pill tb-dp clickable" data-action="nav" data-page="today" title="回到今日 · 今日完成进度">
+        <span class="tb-dp-date">${fmtMD(TODAY)}<span class="wd">周${WD[TODAY.getDay()]}</span></span>
+        <span class="tb-dp-sep"></span>
+        <div class="ring-wrap ring-sm">${ringSVG(td,tt)}</div>
+      </div>
+    </div>`;
+}
+
+/* ---------- 渲染：主内容 ---------- */
+function renderMain(){
+  const m=document.getElementById('main');
+  if(state.page==='today') m.innerHTML=renderToday();
+  else if(state.page==='stats') m.innerHTML=renderStats();
+  else if(state.page==='calendar') m.innerHTML=renderCalendar();
+  else if(state.page==='settings') m.innerHTML=renderSettings();
+  // 底部输入框：独立于滚动区，固定吸附视口底部，仅在今日页显示
+  const ql=document.getElementById('qabar-layer');
+  ql.innerHTML = state.page==='today' ? renderQABar() : '';
+}
+function escAttr(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* ---------- 卡片右侧：只读优先级 + 独立环形进度（父/子任务同款） ---------- */
+const PRIO_NAMES=['低','普通','高','紧急'], PRIO_VARS=['low','normal','high','urgent'];
+function prioReadHTML(v){
+  const n=PRIO_NAMES[v]||'低';
+  return `<span class="prio-tag prio-${PRIO_VARS[v||0]} prio-readonly" title="优先级：${n}（可通过右键菜单调整）"><span class="prio-dot"></span>${n}</span>`;
+}
+function miniRing(pct){
+  const p=Math.max(0,Math.min(100,pct)),r=8,c=2*Math.PI*r;
+  return `<span class="task-ring" title="子任务已完成 ${p}%">
+    <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="${r}" fill="none" stroke="var(--line)" stroke-width="3"/>
+    <circle cx="10" cy="10" r="${r}" fill="none" stroke="var(--done-anim)" stroke-width="3" stroke-linecap="round"
+      stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c*(1-p/100)).toFixed(2)}" transform="rotate(-90 10 10)"/></svg>
+    <span class="ring-pct">${p}%</span></span>`;
+}
+
+/* ---------- 内联新增子任务（编辑框恒在列表最上方，新子任务倒序置顶） ---------- */
+function inlineSubHTML(t){
+  return `<div class="subtask inline-sub" data-inline-parent="${t.uid}">
+    <div class="inline-sub-row">
+      <span class="inline-sub-dot"></span>
+      <input class="inline-sub-input" id="inlineSubInput" data-parent="${t.uid}"
+        value="${escAttr(state.inlineSubDraft)}" placeholder="输入子任务内容，回车创建…" autocomplete="off"/>
+      <span class="prio-tag prio-${PRIO_VARS[t.priority||0]} prio-readonly" title="新子任务优先级跟随父任务"><span class="prio-dot"></span>${PRIO_NAMES[t.priority||0]}</span>
+      <span class="act" data-action="inline-sub-cancel" data-id="${t.uid}" title="取消">${svg('close')}</span>
+    </div>
+    <div class="inline-sub-hint">回车保存为展示态子任务 · 优先级跟随父任务 · 新子任务排在最上方 · Esc 取消</div>
+  </div>`;
+}
+function expandChain(uid){ let cur=findTask(uid),guard=0;
+  while(cur&&guard++<20){ state.collapsed[cur.uid]=false; cur=cur.parentUid?findTask(cur.parentUid):null; } }
+function focusInlineSub(){ const i=document.getElementById('inlineSubInput');
+  if(i){ i.focus(); try{ i.setSelectionRange(i.value.length,i.value.length); }catch(e){} }
+  requestAnimationFrame(()=>{ const n=document.getElementById('inlineSubInput'); if(n&&document.activeElement!==n)n.focus(); }); }
+function resetInlineEdit(){ state.inlineEditFor=null; state.inlineEditDraft=''; }
+function startInlineSub(pid){
+  const t=findTask(pid); if(!t)return;
+  if(state.page!=='today')state.page='today';
+  resetInlineEdit(); expandChain(pid);
+  state.inlineSubFor=pid; state.inlineSubDraft='';
+  render(); focusInlineSub();
+}
+function cancelInlineSub(){ state.inlineSubFor=null; state.inlineSubDraft=''; render(); }
+function submitInlineSub(input){
+  const pid=input.dataset.parent||state.inlineSubFor;
+  const v=(input.value||'').trim();
+  if(!v){ cancelInlineSub(); return; }
+  const p=findTask(pid); if(!p){ cancelInlineSub(); return; }
+  // 子任务优先级默认与父任务一致；后续如需单独调整，只能走右键菜单
+  const ns=mk({parentUid:pid,title:v,done:false,category:p.category||'',priority:p.priority||0});
+  p.subs=p.subs||[]; p.subs.unshift(ns); flat.push(ns);   // 倒序：最新添加的子任务置顶
+  updateParentState(p);
+  state.inlineSubFor=null; state.inlineSubDraft=''; state.collapsed[pid]=false;
+  render(); say('已添加子任务：'+v);
+}
+
+/* ---------- 卡片内联编辑（右键「编辑」原地改标题，不弹任何对话框） ---------- */
+function focusInlineEdit(){ const i=document.getElementById('inlineEditInput');
+  if(i){ i.focus(); try{ i.select(); }catch(e){} }
+  requestAnimationFrame(()=>{ const n=document.getElementById('inlineEditInput');
+    if(n&&document.activeElement!==n){ n.focus(); try{ n.select(); }catch(e){} } }); }
+function startInlineEdit(id){
+  const t=findTask(id); if(!t)return;
+  if(t.done){ say('已完成任务不可编辑'); return; }
+  if(state.page!=='today')state.page='today';
+  state.inlineSubFor=null; state.inlineSubDraft='';
+  expandChain(id);
+  state.inlineEditFor=id; state.inlineEditDraft=t.title;
+  render(); focusInlineEdit();
+}
+function cancelInlineEdit(){ resetInlineEdit(); render(); }
+function submitInlineEdit(input){
+  const id=input.dataset.id||state.inlineEditFor;
+  if(state.inlineEditFor!==id)return;                 // 防止 blur 与回车重复提交
+  const v=(input.value||'').trim(), t=findTask(id);
+  state.inlineEditFor=null; state.inlineEditDraft='';
+  if(t&&v&&v!==t.title){ t.title=v; t.updatedAt=Date.now(); render(); say('已保存：'+v); }
+  else { render(); if(!v)say('标题不能为空，已取消修改'); }
+}
+function nodeHTML(t,isSub,o){
+  o=o||{};
+  const sp=subProgress(t);
+  const cat=categories.find(c=>c.name===t.category);
+  const inlineFor=state.inlineSubFor===t.uid;
+  const editing=state.inlineEditFor===t.uid;
+  const open=inlineFor||!state.collapsed[t.uid];
+  const kids=liveSubs(t);
+  const hasSubs=kids.length>0;
+  const isParent=hasSubs;                 // 含子任务 → 完成态由子任务推导，禁止自身直接完成
+  let children='';
+  if(hasSubs||inlineFor){ children=`<div class="subtasks ${open?'open':''}">`+
+    (inlineFor?inlineSubHTML(t):'')+                       // 编辑框始终位于子任务列表最上方
+    (hasSubs?kids.map(s=>nodeHTML(s,true,o)).join(''):'')+`</div>`; }
+  // 右侧操作行：分类（仅「全部」视图）→ 只读优先级 → 环形进度 → 展开按钮，全部同一行
+  const catHTML=(!isSub&&cat&&o.showCat)
+    ? `<span class="cat-tag side-cat"><span class="cat-dot" style="background:${cat.color}"></span>${cat.name}</span>`:'';
+  const ring=sp?miniRing(sp.pct):'';
+  const expandBtn=hasSubs?`<button class="exp-btn ${open?'open':''}" data-action="expand" data-id="${t.uid}" title="展开/收起子任务">${svg('chevron')}</button>`:'';
+  const titleHTML=editing
+    ? `<input class="inline-edit-input" id="inlineEditInput" data-id="${t.uid}" value="${escAttr(state.inlineEditDraft||t.title)}" placeholder="输入任务标题，回车保存…" autocomplete="off"/>`
+    : `<div class="task-title ${t.done?'done':''}">${t.title}</div>`;
+  // 今日 / 月历均不显示完成时间；第二行仅用于内联编辑提示
+  const metaBits=[];
+  if(t.done&&t.completedAt&&o.showCompletedAt) metaBits.push(`<span class="task-meta">完成于 ${fmtMD(t.completedAt)}</span>`);
+  if(editing) metaBits.push(`<span class="task-meta">回车保存 · Esc 取消</span>`);
+  const metaHTML=metaBits.length?`<div class="task-sub">${metaBits.join('')}</div>`:'';
+  // 整张卡片可单击切换展开/收缩（父任务与含子任务的子任务一视同仁）；
+  // 勾选圈 / 展开按钮 / 编辑输入框自带 data-action，不会被 closest 误判为卡片点击
+  const cardClass=isSub?'subtask':'task';
+  return `<div class="${cardClass} ${t.done?'done':''} ${editing?'editing':''} ${hasSubs?'has-subs':''}"
+      data-id="${t.uid}" data-action="toggle-card" title="${hasSubs?'单击卡片展开 / 收起子任务':''}">
+      <span class="pfill"><i></i></span>
+      <div class="task-row">
+        <span class="check ${t.done?'on':''} ${isParent?'readonly':''} ${isParent&&!t.done?'dash-circle':''}" data-action="check" data-id="${t.uid}" title="${isParent?'含子任务：完成状态由子任务决定':'点击完成'}">${isParent&&!t.done?svg('dashRing','dash-ring'):''}${t.done?svg('check','check-mark'):''}</span>
+        <div class="task-body">
+          ${titleHTML}
+          ${metaHTML}
+        </div>
+        <div class="task-side">
+          ${catHTML}
+          ${prioReadHTML(t.priority)}
+          ${ring}
+          ${expandBtn}
+        </div>
+      </div>
+    </div>${children}`;
+}
+function taskCardHTML(t,o){
+  // map(taskCardHTML) 会把下标作为第二参数传入，此处只接受显式 opts，否则按今日待办规则兜底
+  const opts=(o&&typeof o==='object')?o:{showCat:state.filter==='all',showCompletedAt:false};
+  return `<div class="task-group" data-gid="${t.uid}">${nodeHTML(t,false,opts)}</div>`;
+}
+function renderToday(){
+  if(!qaSelCat) qaSelCat = state.filter!=='all'?state.filter:categories[0].name;
+  const chips=`<div class="chip ${state.filter==='all'?'active':''}" data-action="filter" data-cat="all">全部</div>`+
+    categories.map(c=>{ const act=state.filter===c.name;
+      const sty=act?` style="background:${c.color};border-color:${c.color};color:#fff"`:'';
+      return `<div class="chip ${act?'active':''}" data-action="filter" data-cat="${c.name}"${sty}>${act?'':`<span class="cat-dot" style="background:${c.color}"></span>`}${c.name}</div>`;
+    }).join('')+`<button type="button" class="chip chip-add" data-action="cat-open" title="添加分类"><span class="chip-add-plus">+</span> 添加分类</button>`;
+  // 今日待办：仅在「全部」分类下显示分类标签；不显示完成时间
+  const list=tasks.filter(showInToday)
+    .map(t=>taskCardHTML(t,{showCat:state.filter==='all',showCompletedAt:false})).join('');
+  const body=list||`<div class="breather"><div class="big">🌿</div>这个分类今天没有待办，歇口气～</div>`;
+  const selCat=qaSelCat, selColor=catColorOf(selCat);
+  const opt=(name)=>`<div class="qa-dd-opt" data-action="qa-dd-sel" data-cat="${name}">${name==='全部'?'':`<span class="qa-dd-dot" style="background:${catColorOf(name)}"></span>`}<span class="lbl">${name}</span></div>`;
+  const menu=[opt('全部')].concat(categories.map(c=>opt(c.name))).join('');
+  return `<div class="page page-today">
+    <div class="filter-sticky"><div class="filterbar">${chips}</div></div>
+    ${body}</div>`;
+}
+function renderQABar(){
+  const selCat=qaSelCat, selColor=catColorOf(selCat);
+  const opt=(name)=>`<div class="qa-dd-opt" data-action="qa-dd-sel" data-cat="${name}">${name==='全部'?'':`<span class="qa-dd-dot" style="background:${catColorOf(name)}"></span>`}<span class="lbl">${name}</span></div>`;
+  const menu=[opt('全部')].concat(categories.map(c=>opt(c.name))).join('');
+  // 底部优先级：点击左侧胶囊弹出下拉（紧急/高/普通/低），不再挨个循环切换
+  const prioOpts=PRIO_NAMES.map((p,i)=>`<div class="qa-dd-opt ${qaPrio===i?'cur':''}" data-action="qa-prio-sel" data-v="${i}"><span class="prio-dot" style="background:var(--prio-${PRIO_VARS[i]})"></span>${p}</div>`).join('');
+  return `<div class="qa-bar">
+      <div class="qa-prio-wrap">
+        <button class="qa-prio prio-${PRIO_VARS[qaPrio]}" data-action="qa-prio-open" title="选择优先级">
+          <span class="prio-dot"></span><span class="qa-prio-txt">${PRIO_NAMES[qaPrio]}</span>${svg('chevron')}
+        </button>
+        <div class="qa-prio-menu" id="qaPrioMenu">${prioOpts}</div>
+      </div>
+      <input class="qa-input" id="qaInput" placeholder="添加待办，回车快速创建…" />
+      <div class="qa-dd" id="qaDD">
+        <div class="qa-dd-trigger" data-action="qa-dd-open">
+          ${selCat==='全部'?'':`<span class="qa-dd-dot" style="background:${selColor}"></span>`}
+          <span class="qa-dd-label">${selCat}</span>
+          ${svg('chevron')}
+        </div>
+        <div class="qa-dd-menu" id="qaDDMenu">${menu}</div>
+      </div>
+    </div>`;
+}
+function heatLevel(c){ if(c<=0)return 0; if(c<=2)return 1; if(c<=4)return 2; if(c<=7)return 3; return 4; }
+function ringSVG(done,total){
+  const r=18,c=2*Math.PI*r,pct=total?done/total:0;
+  return `<svg viewBox="0 0 46 46"><defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="var(--mint)"/><stop offset="1" stop-color="var(--mint-deep)"/></linearGradient></defs>
+    <circle cx="23" cy="23" r="${r}" fill="none" stroke="var(--line)" stroke-width="5"/>
+    <circle cx="23" cy="23" r="${r}" fill="none" stroke="url(#rg)" stroke-width="5" stroke-linecap="round"
+      stroke-dasharray="${c}" stroke-dashoffset="${c*(1-pct)}" transform="rotate(-90 23 23)"/>
+    <text x="23" y="27" text-anchor="middle" font-size="11" fill="var(--ink)" font-weight="800">${total?Math.round(pct*100):0}%</text></svg>`;
+}
+/* ---------- 统计图表 tooltip：热力色块 / 环形扇区与图例 / 折线数据点 ----------
+ * 点击任一节点 → 固定显示「完成 N 项任务」；悬停为轻量预览；
+ * 点击其它位置、Esc、滚动、页面重渲染时自动关闭。
+ */
+let chartTipPinned=false, chartTipAnchor=null;
+function chartNode(label,count,extra){
+  return `data-chart="1" data-action="chart-node" data-label="${escAttr(label)}" `+
+    `data-count="${Number(count)||0}" data-extra="${escAttr(extra||'')}"`;
+}
+function hideChartTip(){
+  const tip=document.getElementById('chartTip'); if(!tip)return;
+  tip.classList.remove('show'); tip.setAttribute('aria-hidden','true');
+  chartTipPinned=false; chartTipAnchor=null;
+}
+function showChartTip(el,pin){
+  const tip=document.getElementById('chartTip'); if(!tip||!el)return;
+  if(pin)chartTipPinned=true;
+  if(chartTipAnchor===el&&tip.classList.contains('show'))return;   // 同一节点不重复重排
+  chartTipAnchor=el;
+  const n=Number(el.dataset.count||0), label=el.dataset.label||'', extra=el.dataset.extra||'';
+  tip.innerHTML=`<div class="ct-label">${escAttr(label)}</div>`+
+    `<div class="ct-main">完成 <b>${n}</b> 项任务</div>`+
+    (extra?`<div class="ct-extra">${escAttr(extra)}</div>`:'');
+  tip.setAttribute('aria-hidden','false'); tip.classList.add('show');
+  const r=el.getBoundingClientRect(), tw=tip.offsetWidth, th=tip.offsetHeight;
+  const left=Math.max(10,Math.min(r.left+r.width/2-tw/2,window.innerWidth-tw-10));
+  // 优先放在节点上方；若会压住所属卡片标题（如环形图顶部扇区），则改放下方
+  const card=el.closest('.stat-card'), cardTop=card?card.getBoundingClientRect().top:0;
+  const minTop=card?cardTop+48:8;
+  let top=r.top-th-12, below=false;
+  if(top<minTop){ top=r.bottom+12; below=true; }
+  tip.style.left=left+'px'; tip.style.top=top+'px';
+  tip.classList.toggle('below',below);
+}
+function renderStats(){
+  const range=state.range; let days,start;
+  if(range==='week'){days=7;start=addDays(TODAY,-6);} else if(range==='month'){days=30;start=addDays(TODAY,-29);}
+  else{days=364;start=addDays(TODAY,-363);}
+  const isCols7=range!=='year';
+  const fullDate=d=>d.getFullYear()+'年'+fmtMD(d);
+  const monIdx=d=>(d.getDay()+6)%7;                 // 周一=0 … 周日=6，与横轴标签一致
+  let cells='',rows=1;
+  if(range==='year'){ const total=371;
+    const aligned=addDays(start,-monIdx(start));    // 年视图起点也按周一补齐，行序与周几对齐
+    for(let i=0;i<total;i++){ const d=addDays(aligned,i);
+      const inRange=d>=start&&d<=TODAY; const c=inRange?doneByDay[dk(d)]||0:null;
+      const lvl=c===null?-1:heatLevel(c);
+      const attrs=c===null?'':chartNode(fullDate(d),c,'当日完成数');
+      cells+=`<div class="cell" ${attrs} style="background:${lvl<0?'transparent':'var(--heat-'+lvl+')'}"></div>`; }
+  } else if(range==='week'){
+    // 近一周：7 天各占一列（col=周几），单行铺满；显式锁定 grid-row:1 防止首格非周一时被自动流挤到第二行
+    for(let i=0;i<7;i++){ const d=addDays(start,i); const c=doneByDay[dk(d)]||0;
+      cells+=`<div class="cell" ${chartNode(fullDate(d),c,'当日完成数')} style="grid-row:1;grid-column:${monIdx(d)+1};background:var(--heat-${heatLevel(c)})"></div>`; }
+  } else {
+    // 近一月：起点对齐周一，每行恰一周；col=周几、row=第几周，正方形格子由容器 aspect-ratio 保证
+    const offset=monIdx(start); rows=Math.ceil((offset+30)/7);
+    for(let j=0;j<30;j++){ const d=addDays(start,j); const c=doneByDay[dk(d)]||0;
+      const slot=offset+j;
+      cells+=`<div class="cell" ${chartNode(fullDate(d),c,'当日完成数')} style="grid-column:${slot%7+1};grid-row:${Math.floor(slot/7)+1};background:var(--heat-${heatLevel(c)})"></div>`; }
+  }
+  const wd=['一','二','三','四','五','六','日'];
+  const headHtml=isCols7?`<div class="heat-head">${wd.map(w=>`<span>${w}</span>`).join('')}</div>`:'';
+  const inRange=flat.filter(t=>t.done&&t.completedAt&&t.completedAt>=start&&t.completedAt<=TODAY&&!t.parentUid);
+  const byCat={}; inRange.forEach(t=>byCat[t.category]=(byCat[t.category]||0)+1);
+  // 图例基底 = 所有已添加分类（无完成数据显示 0）+ 区间内仍有完成记录的旧分类
+  const entries=Array.from(new Set([...categories.map(c=>c.name),...Object.keys(byCat)]))
+    .map(name=>[name,byCat[name]||0])
+    .sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
+  const realSum=entries.reduce((a,e)=>a+e[1],0); const sum=realSum||1;
+  let acc=0,ringParts='',legend=''; const RR=54,CC=2*Math.PI*RR;
+  entries.forEach(([name,n])=>{ const col=(categories.find(c=>c.name===name)||{}).color||'#999';
+    const extra='占区间完成 '+Math.round(n/sum*100)+'%';
+    legend+=`<div class="chart-legend-row" ${chartNode(name,n,extra)}><span class="cat-dot" style="background:${col};width:10px;height:10px;border-radius:50%"></span>${name} · ${n}</div>`;
+    if(!n) return;
+    const frac=n/sum,off=CC*(1-acc); acc+=frac;
+    ringParts+=`<circle class="ring-arc" ${chartNode(name,n,extra)} cx="72" cy="72" r="${RR}" fill="none" stroke="${col}" stroke-width="15" stroke-dasharray="${CC*frac} ${CC}" stroke-dashoffset="${-off+CC}" transform="rotate(-90 72 72)"/>`; });
+  if(!realSum) ringParts='<circle cx="72" cy="72" r="54" fill="none" stroke="var(--line)" stroke-width="15"/>';
+  let pts=[],labels=[]; const W=540,H=150,pd=12;
+  if(range==='year'){
+    // 按自然月分桶（跨年时按「年-月」区分，避免把两个同名月份合并）
+    const buckets=new Map();
+    for(let i=0;i<days;i++){ const d=addDays(start,i), k=d.getFullYear()+'-'+d.getMonth();
+      if(!buckets.has(k))buckets.set(k,{label:d.getFullYear()+'年'+(d.getMonth()+1)+'月',n:0});
+      buckets.get(k).n+=doneByDay[dk(d)]||0; }
+    buckets.forEach(b=>{ labels.push(b.label); pts.push(b.n); });
+  } else {
+    for(let i=0;i<days;i++){ const d=addDays(start,i); labels.push(fullDate(d)); pts.push(doneByDay[dk(d)]||0); }
+  }
+  const max=Math.max(1,...pts); const stepX=pts.length>1?(W-pd*2)/(pts.length-1):0;
+  const xy=pts.map((v,i)=>[pd+i*stepX,H-pd-(v/max)*(H-pd*2)]);
+  // 平滑曲线：Catmull-Rom → 三次贝塞尔
+  function smoothPath(ps){
+    if(ps.length<2) return ps.map(p=>`M${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+    let d=`M${ps[0][0].toFixed(1)},${ps[0][1].toFixed(1)}`;
+    for(let i=0;i<ps.length-1;i++){
+      const p0=ps[Math.max(0,i-1)],p1=ps[i],p2=ps[i+1],p3=ps[Math.min(ps.length-1,i+2)];
+      const c1x=p1[0]+(p2[0]-p0[0])/6, c1y=p1[1]+(p2[1]-p0[1])/6;
+      const c2x=p2[0]-(p3[0]-p1[0])/6, c2y=p2[1]-(p3[1]-p1[1])/6;
+      d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+    }
+    return d;
+  }
+  const lineD=smoothPath(xy);
+  const fillD=`${lineD} L${(W-pd).toFixed(1)},${(H-pd).toFixed(1)} L${pd},${(H-pd).toFixed(1)} Z`;
+  const dots=pts.map((v,i)=>`<circle class="chart-dot" cx="${xy[i][0].toFixed(1)}" cy="${xy[i][1].toFixed(1)}" r="3" fill="var(--mint)"/>`).join('');
+  const hits=pts.map((v,i)=>`<circle class="chart-hit" ${chartNode(labels[i],v,range==='year'?'按月汇总':'当日完成数')} cx="${xy[i][0].toFixed(1)}" cy="${xy[i][1].toFixed(1)}" r="10" pointer-events="all"/>`).join('');
+  const lineSvg=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--mint)" stop-opacity=".25"/><stop offset="1" stop-color="var(--mint)" stop-opacity="0"/></linearGradient></defs>
+    <line x1="${pd}" y1="${H-pd}" x2="${W-pd}" y2="${H-pd}" stroke="var(--line)"/>
+    <path d="${fillD}" fill="url(#lg)"/>
+    <path d="${lineD}" fill="none" stroke="var(--mint)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+    ${dots}${hits}</svg>`;
+  const tabs=(r,l)=>`<button class="${state.range===r?'on':''}" data-action="range" data-r="${r}">${l}</button>`;
+  return `<div class="page page-stats">
+    <div class="range-sticky"><div class="range-tabs">${tabs('week','近一周')}${tabs('month','近一月')}${tabs('year','近一年')}</div></div>
+    <div class="stat-grid">
+      <div class="stat-card"><h3>完成热力图</h3><p class="chart-hint">点击色块查看当日完成了几项任务</p>${headHtml}<div class="heat ${isCols7?'cols7':''}" ${isCols7?`style="--heat-rows:${rows};aspect-ratio:7/${rows}"`:''}>${cells}</div>
+        <div class="heat-legend">少 <i style="background:var(--heat-0)"></i><i style="background:var(--heat-1)"></i><i style="background:var(--heat-2)"></i><i style="background:var(--heat-3)"></i><i style="background:var(--heat-4)"></i> 多</div></div>
+      <div class="stat-card"><h3>分类占比（区间完成）</h3><p class="chart-hint">点击扇区或图例查看该分类完成数</p><div class="ring-box">
+        <svg viewBox="0 0 144 144" style="width:144px;height:144px">${ringParts}</svg>
+        <div class="ring-legend">${legend||'<span style="color:var(--ink-3)">暂无完成</span>'}</div></div></div>
+      <div class="stat-card" style="grid-column:1/-1"><h3>${range==='year'?'每月完成趋势':'每日完成趋势'}</h3>
+        <p class="chart-hint">点击数据点查看${range==='year'?'当月':'当日'}完成了几项任务</p><div class="line-box">${lineSvg}</div></div>
+    </div></div>`;
+}
+function renderCalendar(){
+  const cm=state.calMonth,y=cm.getFullYear(),mo=cm.getMonth();
+  const first=new Date(y,mo,1),startDow=first.getDay(),daysInMo=new Date(y,mo+1,0).getDate();
+  let cells=''; const dows=['日','一','二','三','四','五','六'];
+  dows.forEach(d=>cells+=`<div class="cal-dow">${d}</div>`);
+  for(let i=0;i<startDow;i++) cells+=`<div></div>`;
+  for(let d=1;d<=daysInMo;d++){ const date=new Date(y,mo,d),key=dk(date),cnt=doneByDay[key]||0;
+    const isToday=sameDay(date,TODAY),sel=state.calSel===key;
+    const hasDone=cnt>0;
+    cells+=`<div class="cal-cell ${isToday?'today':''} ${sel?'sel':''}" data-action="cal-day" data-key="${key}"><div class="d">${d}</div>${hasDone?`<span class="cal-dot" title="${cnt} 件已完成"></span>`:''}</div>`; }
+  const selDate=new Date(state.calSel+'T00:00:00');
+  const doneOn=flat.filter(t=>t.done&&t.completedAt&&dk(t.completedAt)===state.calSel&&!t.parentUid);
+  // 月历完成列表也不展示完成时间（日期已在面板与列表标题中给出），卡片恒为紧凑单行
+  const dayList=doneOn.length?doneOn.map(t=>taskCardHTML(t,{showCat:true,showCompletedAt:false})).join(''):`<div class="breather" style="padding:30px 20px">${fmtMD(selDate)} 没有完成的任务</div>`;
+  return `<div class="page">
+    <div class="cal-layout">
+      <div class="cal-panel">
+        <div class="cal-head">
+          <div class="cal-mid">
+            <div class="cal-nav" data-action="cal-prev">‹</div>
+            <b>${y}年 ${mo+1}月</b>
+            <div class="cal-nav" data-action="cal-next">›</div>
+          </div>
+          <div class="cal-nav cal-today" data-action="cal-today">回到今天</div>
+        </div>
+        <div class="cal-grid">${cells}</div>
+      </div>
+      <div class="cal-daylist">
+        <h3>${fmtMD(selDate)} 完成（${doneOn.length}）</h3>
+        ${dayList}
+      </div>
+    </div></div>`;
+}
+function renderSettings(){
+  const s=state.sync, st=syncStatus();
+  const themeSeg=['light','dark'].map(t=>`<button class="${state.theme===t?'on':''}" data-action="theme" data-t="${t}">${t==='light'?'薄荷绿':'深夜青灰'}</button>`).join('');
+  const skinSeg=['mint','soft'].map(k=>`<button class="${state.skin===k?'on':''}" data-action="skin" data-k="${k}">${k==='mint'?'清新':'柔和'}</button>`).join('');
+  const urlBad=s.url&&!/^https?:\/\/.+\/$/.test(s.url);
+  return `<div class="page">
+    <div class="set-section"><h3>外观</h3>
+      <div class="field"><label>主题</label><div class="seg">${themeSeg}</div></div>
+      <div class="field"><label>完成动画皮肤</label><div class="seg">${skinSeg}</div></div>
+      <div class="field"><label>完成进度风格</label><div class="swatch-row">
+        ${PROG_COLORS.map(c=>`<button class="swatch ${state.progressColor===c.v?'on':''}" data-action="prog-color" data-v="${c.v}" title="${c.name}" style="background:${c.v};--swatch-color:${c.v}"></button>`).join('')}</div></div>
+    </div>
+    <div class="set-section"><h3>WebDAV 同步</h3>
+      <div class="field"><label>同步状态</label><span class="sync-state ${st.cls}">${svg(st.icon)}${st.label}</span></div>
+      <div class="field"><label>启用同步</label><div class="switch ${s.on?'on':''}" data-action="sync-on"><i></i></div></div>
+      ${s.on ? `
+      <div class="field"><label>服务器地址</label><input class="input ${urlBad?'bad':''}" data-field="url" value="${s.url}" placeholder="https://dav.example.com/doit/"/></div>
+      <div class="field"><label>账号</label><input class="input" data-field="user" value="${s.user}" placeholder="WebDAV 用户名"/></div>
+      <div class="field"><label>密码 / 令牌</label><input class="input" type="password" data-field="pass" value="${s.pass}" placeholder="应用专用密码或只读令牌"/></div>
+      <div class="field" style="border:none;justify-content:flex-end;gap:10px">
+        <button class="btn ghost" data-action="sync-test">测试连接</button>
+        <button class="btn accent" data-action="sync-save" ${urlBad||!s.user||!s.pass?'disabled':''}>保存并同步</button></div>
+      <p class="hint" style="margin-top:12px">云中间带对钩 = 已与远程同步；一旦任务有更改，对钩消失、顶部状态条转为琥珀色并显示上传箭头。点击顶部状态条或「保存并同步」即可重新对齐。</p>` : ''}</div>
+    <div class="set-section"><h3>关于</h3>
+      <div class="field"><label>版本</label><span>doit-desktop 原型 v0.1 · 数据契约 v2</span></div>
+      <div class="field" style="border:none"><label>同步文件</label><span>doit-backup.json（与手机端共用）</span></div></div></div>`;
+}
+
+/* ---------- 局部刷新（编辑、优先级、子任务均为卡片内联，不再有操作弹框） ---------- */
+function refreshViews(){ renderTopbar(); renderMain(); }
+function updateParentState(t){ const kids=liveSubs(t);
+  if(kids.length){const all=kids.every(s=>s.done);t.done=all;t.completedAt=all?TODAY:null;} recalcUp(t.uid); }
+function removeFromFlat(uid){ const t=findTask(uid); if(t&&t.subs)t.subs.forEach(s=>removeFromFlat(s.uid));
+  const i=flat.findIndex(x=>x.uid===uid); if(i>=0)flat.splice(i,1); }
+
+/* ---------- Toast ---------- */
+let toastTimer=null;
+function say(msg){ const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove('show'),2200); }
+
+/* ---------- 渲染入口 ---------- */
+let lastRenderedPage=null;
+function render(){
+  document.body.setAttribute('data-theme',state.theme);
+  document.body.setAttribute('data-skin',state.skin);
+  // 仅首次加载 / 切换页面播放入场动画；同一页内的局部刷新保持画面稳定
+  const pageChanged=state.page!==lastRenderedPage;
+  document.body.classList.toggle('quiet-render',!pageChanged);
+  hideChartTip();                                  // 重渲染会替换图表节点，旧 tooltip 立即收起
+  renderTopbar(); renderMain();
+  lastRenderedPage=state.page;
+}
+
+/* ---------- 事件 ---------- */
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-action]');   // 先取值，防止内联编辑保存时重建 DOM
+  // 内联编辑态下点到卡片外部：先同步保存标题，避免后续 render 丢草稿
+  if(state.inlineEditFor && e.target.id!=='inlineEditInput' && !e.target.closest('#ctx')){
+    const inp=document.getElementById('inlineEditInput'); if(inp)submitInlineEdit(inp);
+  }
+  // 点击图表节点以外的任何位置，收起已固定的 tooltip
+  if(!e.target.closest('[data-chart]'))hideChartTip();
+  if(Date.now()<suppressClickUntil) return;
+  const qaDD=document.getElementById('qaDD'); if(qaDD && !e.target.closest('#qaDD')) qaDD.classList.remove('open');
+  const qm=document.getElementById('qaPrioMenu'); if(qm && !e.target.closest('.qa-prio-wrap')){ qm.classList.remove('open'); const w=document.querySelector('.qa-prio-wrap'); if(w)w.classList.remove('open'); }
+  if(!el)return; const a=el.dataset.action;
+  if(a==='nav'){state.page=el.dataset.page; state.filter=state.page==='today'?'all':state.filter; state.inlineSubFor=null; state.inlineSubDraft=''; resetInlineEdit(); render();}
+  else if(a==='filter'){state.filter=el.dataset.cat; if(state.filter!=='all')qaSelCat=state.filter; else qaSelCat=categories[0].name; if(state.page!=='today')state.page='today'; state.inlineSubFor=null; state.inlineSubDraft=''; resetInlineEdit(); render();}
+  else if(a==='new'){focusAdd();}
+  else if(a==='cat-open'){ openCatModal(); }
+  else if(a==='cat-close'){ closeCatModal(); }
+  else if(a==='cat-add-row'){ catRows.push(catRow()); renderCatRows(); const ins=document.querySelectorAll('#catRows .cat-name-input'); if(ins.length)ins[ins.length-1].focus(); }
+  else if(a==='cat-del'){ catRows=catRows.filter(r=>r.k!==+el.dataset.k); renderCatRows(); }
+  else if(a==='cat-color-toggle'){ const k=+el.dataset.k; catOpenPalette=(catOpenPalette===k?null:k); renderCatRows(); }
+  else if(a==='cat-color'){ const r=catRows.find(r=>r.k===+el.dataset.k); if(r){r.color=el.dataset.v; catOpenPalette=null; renderCatRows();} }
+  else if(a==='cat-name'){ const r=catRows.find(r=>r.k===+el.dataset.k); if(r)r.name=el.value; }
+  else if(a==='cat-save'){ saveCatModal(); }
+  else if(a==='check'){ const card=e.target.closest('.task,.subtask'); if(card)completeFast(card.dataset.id); }
+  else if(a==='expand'||a==='toggle-card'){
+    // 卡片任意位置（含子任务卡片）单击即切换收缩 / 展开；无子任务、内联编辑态不响应
+    const id=el.dataset.id, t=findTask(id);
+    if(!t||!hasLiveSubs(t))return;
+    if(e.target.closest('.editing')||e.target.closest('.inline-edit-input'))return;
+    state.collapsed[id]=!state.collapsed[id];
+    // 直接切换该节点自身的展开状态：只改 class，不重建任何 DOM 节点。
+    // 避免 outerHTML 重建导致子任务重绘 / 入场动画重放（视觉闪烁）。
+    const card=el.closest('.task,.subtask');
+    // 子任务卡片不在独立 .task-group 中，必须从「自身卡片」定位其紧随的子任务容器，
+    // 不能从 .task-group 找——那会误命中父任务的容器。
+    const sub=card&&card.nextElementSibling&&card.nextElementSibling.classList.contains('subtasks')
+      ?card.nextElementSibling:null;
+    const expBtn=card?card.querySelector('.task-row > .task-side > .exp-btn'):null;
+    const shouldOpen=state.inlineSubFor===id||!state.collapsed[id];
+    sub?.classList.toggle('open',shouldOpen);
+    expBtn?.classList.toggle('open',shouldOpen);
+    renderTopbar();
+  }
+  else if(a==='edit'){startInlineEdit(el.dataset.id);}
+  else if(a==='sub'){startInlineSub(el.dataset.id);}
+  else if(a==='inline-sub-cancel'){cancelInlineSub();}
+  else if(a==='del'){state.confirmDelete=el.dataset.id;openDel();}
+  else if(a==='theme'){state.theme=el.dataset.t;render();}
+  else if(a==='skin'){state.skin=el.dataset.k;render();}
+  else if(a==='prog-color'){state.progressColor=el.dataset.v;applyProgressColor();render();}
+  else if(a==='sync-on'){state.sync.on=!state.sync.on;render();}
+  else if(a==='sync-test'){say('连接成功（模拟）：找到目录 /doit/');}
+  else if(a==='sync-save'){runSync();}
+  else if(a==='sync-now'){runSync();}
+  else if(a==='range'){state.range=el.dataset.r;render();}
+  else if(a==='cal-prev'){state.calMonth=new Date(state.calMonth.getFullYear(),state.calMonth.getMonth()-1,1);render();}
+  else if(a==='cal-next'){state.calMonth=new Date(state.calMonth.getFullYear(),state.calMonth.getMonth()+1,1);render();}
+  else if(a==='cal-today'){state.calMonth=new Date(TODAY.getFullYear(),TODAY.getMonth(),1);state.calSel=dk(TODAY);render();}
+  else if(a==='cal-day'){state.calSel=el.dataset.key;render();}
+  else if(a==='del-yes'){deleteTask(state.confirmDelete);closeDel();}
+  else if(a==='del-no'){closeDel();}
+  else if(a==='qa-dd-open'){ const dd=document.getElementById('qaDD'); if(dd)dd.classList.toggle('open'); }
+  else if(a==='qa-dd-sel'){ qaSelCat=el.dataset.cat; const dd=document.getElementById('qaDD');
+    if(dd){dd.classList.remove('open'); const lbl=dd.querySelector('.qa-dd-label'); const dot=dd.querySelector('.qa-dd-dot');
+      if(lbl)lbl.textContent=qaSelCat; if(dot)dot.style.background=qaSelCat==='全部'?'transparent':catColorOf(qaSelCat);} }
+  else if(a==='qa-prio-open'){ const m=document.getElementById('qaPrioMenu'); if(m)m.classList.toggle('open');
+    const w=el.closest('.qa-prio-wrap'); if(w)w.classList.toggle('open',m&&m.classList.contains('open')); }
+  else if(a==='qa-prio-sel'){ qaPrio=+el.dataset.v; const m=document.getElementById('qaPrioMenu');
+    if(m){m.classList.remove('open'); [...m.querySelectorAll('.qa-dd-opt')].forEach(o=>o.classList.toggle('cur',+o.dataset.v===qaPrio));}
+    const btn=document.querySelector('.qa-prio'); if(btn){btn.className='qa-prio prio-'+PRIO_VARS[qaPrio];
+      const t=btn.querySelector('.qa-prio-txt'); if(t)t.textContent=PRIO_NAMES[qaPrio];} }
+  else if(a==='chart-node'){ showChartTip(el,true); }   // 点击总是显示并固定该节点的完成数
+});
+document.addEventListener('input',e=>{
+  if(e.target.id==='inlineSubInput'){ state.inlineSubDraft=e.target.value; return; }
+  if(e.target.id==='inlineEditInput'){ state.inlineEditDraft=e.target.value; return; }
+  const f=e.target.dataset.field; if(!f)return; state.sync[f]=e.target.value;
+    if(f==='url'){const bad=state.sync.url&&!/^https?:\/\/.+\/$/.test(state.sync.url);
+    e.target.classList.toggle('bad',bad);
+    const btn=document.querySelector('[data-action="sync-save"]'); if(btn)btn.disabled=bad||!state.sync.user||!state.sync.pass;}
+});
+/* 失焦兜底：Tab / 点击页面外部等非 click 路径也能保存内联编辑 */
+document.addEventListener('focusout',e=>{
+  if(!e.target||e.target.id!=='inlineEditInput')return;
+  const inp=e.target;
+  setTimeout(()=>{ const cur=document.getElementById('inlineEditInput');
+    if(cur===inp && state.inlineEditFor===inp.dataset.id) submitInlineEdit(inp); },0);
+});
+/* ---------- 图表 tooltip：悬停预览；滚动 / 窗口变化时收起 ---------- */
+document.addEventListener('pointermove',e=>{
+  const el=e.target.closest&&e.target.closest('[data-chart]');
+  if(el)showChartTip(el,false);                   // 悬停预览；已固定时仍可更新到新节点
+  else if(!chartTipPinned)hideChartTip();          // 已点击固定的提示不随鼠标移出而消失
+});
+document.addEventListener('scroll',()=>{ if(chartTipAnchor)hideChartTip(); },true);
+window.addEventListener('resize',hideChartTip);
+
+/* ---------- 完成交互：仅长按卡片展示进度条；走满才完成，中途松手回退 ----------
+ * 进度条颜色统一取 --done-anim（由「设置 → 完成进度风格」写入）
+ * 含子任务的父任务不可自身直接完成，完成态由全部子任务完成自动推导
+ */
+const HOLD_DELAY=150, FILL_DUR=900;
+let lp=null, suppressClickUntil=0;
+function markDone(t,card,delay){
+  t.done=true; t.completedAt=TODAY; t.updatedAt=Date.now();
+  if(t.parentUid)recalcUp(t.uid);                 // 子任务完成后逐级向上联动父任务
+  if(card){ const c=card.querySelector('.check');
+    if(c){ c.classList.remove('ce'); void c.offsetWidth; c.classList.add('on','ce');
+      if(!c.querySelector('.check-mark'))c.insertAdjacentHTML('beforeend',svg('check','check-mark')); } }
+  setTimeout(()=>{ if(card)card.classList.remove('completing'); render(); say('已完成：'+t.title); },delay);
+}
+/* 点击左侧圆圈：直接完成，不展示进度条；父任务只读 */
+function completeFast(id){
+  const t=findTask(id); if(!t||t.done)return;
+  if(hasLiveSubs(t)){ say('该任务含子任务，完成状态由子任务决定'); return; }
+  const card=document.querySelector(`.task[data-id="${id}"],.subtask[data-id="${id}"]`);
+  markDone(t,card,240);
+  // 点圆圈不设点击抑制：长按路径才需要屏蔽随后的 click，避免妨碍连续快速勾选
+}
+/* 长按卡片：进度条 0→100%（这是进度条唯一出现的路径） */
+function startHoldFill(card){
+  card.classList.add('completing');
+  const c=card.querySelector('.check'); if(c){c.classList.remove('on');c.classList.add('ce');
+    const m=c.querySelector('.check-mark'); if(m)m.remove();}
+  const bar=card.querySelector('.pfill>i'); if(!bar)return;
+  bar.style.transition='none'; bar.style.width='0';
+  void bar.offsetWidth;                          // 强制回流，确保过渡从 0 起步
+  bar.style.transition=`width ${FILL_DUR}ms linear`;
+  bar.style.width='100%';
+}
+/* 进度条没走完就撒手：平滑回退到 0，且不改变完成状态 */
+function rollbackFill(card){
+  if(!card)return;
+  const bar=card.querySelector('.pfill>i');
+  if(bar){ bar.style.transition='width .28s cubic-bezier(.22,.61,.36,1)'; bar.style.width='0'; }
+  card.classList.remove('completing');
+  const c=card.querySelector('.check'); if(c)c.classList.remove('ce');
+}
+document.addEventListener('pointerdown',e=>{
+  if(e.button!==0)return;
+  if(ctx.style.display==='block')return;      // 仅右键菜单真正展开时屏蔽长按（初始 display 为空，不应拦截）
+  if(e.target.closest('#ctx')||e.target.closest('.check')||e.target.closest('.exp-btn')||e.target.closest('.inline-sub')||e.target.closest('.editing')||e.target.closest('.inline-edit-input'))return;
+  const card=e.target.closest('.task,.subtask'); if(!card)return;
+  const t=findTask(card.dataset.id); if(!t||t.done)return;
+  const id=card.dataset.id;
+  lp={card,id,timer:null,holdTimer:null,started:false,finished:false,blocked:hasLiveSubs(t)};
+  lp.timer=setTimeout(()=>{
+    if(!lp||lp.id!==id)return;
+    lp.started=true;
+    suppressClickUntil=Date.now()+600;          // 长按后的 click 不触发展开/收起
+    if(lp.blocked){ say('该任务含子任务，请完成子任务后自动完成'); return; }
+    startHoldFill(card);
+    lp.holdTimer=setTimeout(()=>{
+      if(!lp||lp.id!==id||lp.finished)return;
+      lp.finished=true;                          // 必须按住到进度条走满才标记完成
+      const t2=findTask(id); if(t2&&!t2.done)markDone(t2,card,300);
+    },FILL_DUR);
+  },HOLD_DELAY);
+});
+document.addEventListener('pointerup',e=>{ if(!lp)return;
+  if(lp.timer)clearTimeout(lp.timer);
+  if(lp.holdTimer)clearTimeout(lp.holdTimer);
+  if(lp.started&&!lp.finished&&!lp.blocked) rollbackFill(lp.card);
+  if(lp.started) suppressClickUntil=Date.now()+500;
+  lp=null; });
+document.addEventListener('pointercancel',e=>{ if(!lp)return;
+  if(lp.timer)clearTimeout(lp.timer);
+  if(lp.holdTimer)clearTimeout(lp.holdTimer);
+  if(lp.started&&!lp.finished&&!lp.blocked) rollbackFill(lp.card);
+  lp=null; });
+function quickAdd(){ const i=document.getElementById('qaInput'); if(!i)return; const title=i.value.trim();
+  if(!title){i.focus();say('请输入待办内容');return;}
+  const cat=(qaSelCat&&qaSelCat!=='全部')?qaSelCat:(state.filter!=='all'?state.filter:categories[0].name);
+  const t=mk({title,category:cat,priority:qaPrio,sortOrder:tasks.length});
+  tasks.unshift(t);flat.push(t);say('已添加：'+title);render();
+  setTimeout(()=>{const n=document.getElementById('qaInput');if(n)n.focus();},30); }
+function focusAdd(){ if(state.page!=='today'){state.page='today';render();}
+  setTimeout(()=>{const i=document.getElementById('qaInput');if(i)i.focus();},80); }
+/* 抽屉与操作弹框均已移除：编辑、子任务、优先级设置全部在卡片内 / 右键菜单完成 */
+function deleteTask(id){ const t=findTask(id); if(!t)return; t.deletedAt=Date.now(); if(t.subs)t.subs.forEach(s=>s.deletedAt=Date.now()); say('已删除：'+t.title);render(); }
+function runSync(){ state.sync.spinning=true;state.sync.text='同步中…';renderTopbar();
+  setTimeout(()=>{state.sync.spinning=false;state.sync.text='上次同步 · 刚刚 · 合并 '+(Math.floor(rng()*6)+1)+' 条 · v'+(12+Math.floor(rng()*3));
+    markSynced();                        // 与远程对齐：清掉未同步状态，云中恢复对钩
+    renderTopbar();say('同步完成（模拟三方合并）');},1100); }
+
+/* ---------- 右键菜单 ---------- */
+const ctx=document.getElementById('ctx');
+document.addEventListener('contextmenu',e=>{ const card=e.target.closest('.task, .subtask'); if(!card)return;
+  // 编辑态交给浏览器原生文本菜单，避免打断输入
+  if(card.classList.contains('inline-sub')||card.classList.contains('editing'))return;
+  e.preventDefault();
+  const id=card.dataset.id,t=findTask(id); if(!t)return;
+  const prioOpts=PRIO_NAMES.map((p,i)=>`<div class="${t.priority===i?'cur':''}" data-action="ctx-set-prio" data-id="${id}" data-v="${i}"><span class="prio-dot" style="background:var(--prio-${PRIO_VARS[i]})"></span>${p}</div>`).join('');
+  const catOpts=categories.map(c=>`<div class="${t.category===c.name?'cur':''}" data-action="ctx-set-cat" data-id="${id}" data-v="${c.name}"><span class="cat-dot" style="background:${c.color}"></span>${c.name}</div>`).join('');
+  // 已完成任务仅显示删除；子任务不提供「改分类」（分类永远跟随父任务）
+  const delItem=`<div class="danger" data-action="ctx-del" data-id="${id}">${svg('trash')}删除</div>`;
+  const items=t.done?delItem:
+    `<div data-action="ctx-edit" data-id="${id}">${svg('pencil')}编辑</div>`+
+    `<div data-action="ctx-sub" data-id="${id}">${svg('sub')}子任务</div>`+
+    `<div class="has-sub" data-action="ctx-open-sub" data-sub="prio" data-id="${id}">${svg('flag')}优先级<span class="caret">${svg('chevron')}</span><div class="submenu" data-submenu="prio">${prioOpts}</div></div>`+
+    (t.parentUid?'':`<div class="has-sub" data-action="ctx-open-sub" data-sub="cat" data-id="${id}">${svg('folder')}改分类<span class="caret">${svg('chevron')}</span><div class="submenu" data-submenu="cat">${catOpts}</div></div>`)+
+    delItem;
+  ctx.innerHTML=items;ctx.style.display='block';
+  const x=Math.min(e.clientX,window.innerWidth-180),y=Math.min(e.clientY,window.innerHeight-ctx.offsetHeight-10);
+  ctx.style.left=x+'px';ctx.style.top=y+'px'; });
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#ctx'))ctx.style.display='none';
+  // 颜色气泡：点击入口/气泡以外区域收起
+  if(catOpenPalette!==null && !e.target.closest('.cat-color-anchor')){ catOpenPalette=null; renderCatRows(); }
+});
+ctx.addEventListener('click',e=>{const it=e.target.closest('[data-action]');if(!it)return;
+  const a=it.dataset.action,id=it.dataset.id;
+  if(a==='ctx-open-sub'){ toggleCtxSub(it); return; }
+  ctx.style.display='none';
+  if(a==='ctx-edit')startInlineEdit(id);else if(a==='ctx-sub')startInlineSub(id);
+  else if(a==='ctx-set-prio'){const t=findTask(id);t.priority=+it.dataset.v;t.updatedAt=Date.now();render();say('优先级：'+PRIO_NAMES[+it.dataset.v]);}
+  else if(a==='ctx-set-cat'){const t=findTask(id);t.category=it.dataset.v;t.updatedAt=Date.now();render();say('已移动到 '+it.dataset.v);}
+  else if(a==='ctx-del'){state.confirmDelete=id;openDel();}});
+function toggleCtxSub(item){
+  const open=item.classList.contains('open');
+  ctx.querySelectorAll('.has-sub.open').forEach(x=>x.classList.remove('open','left'));
+  if(!open){ item.classList.add('open');
+    const sub=item.querySelector('.submenu'); const r=sub.getBoundingClientRect();
+    if(r.right>window.innerWidth-8) item.classList.add('left'); } }
+
+/* ---------- 添加分类（一次多个 + 色板，保存后生效） ---------- */
+const CAT_SWATCHES=['#E5B93B','#F2A65A','#38B9D6','#3FBB9C','#C77DFF','#E5688A','#E86A5A','#5B8DEF'];  // 由浅到深（感知亮度降序），与正式工程 CATEGORY_SWATCHES 一致
+let catRows=[], catSeq=0, catOpenPalette=null;  // catOpenPalette: 当前展开色板的行 k，null=全收起
+function catRow(name,color){ return {k:catSeq++,name:name||'',color:color||CAT_SWATCHES[catRows.length%CAT_SWATCHES.length]}; }
+function renderCatRows(){
+  const box=document.getElementById('catRows'); if(!box)return;
+  box.innerHTML=catRows.map(r=>{
+    const open=catOpenPalette===r.k;
+    const palette=open?`<div class="cat-palette">${CAT_SWATCHES.map(c=>`<button type="button" class="cat-swatch ${r.color===c?'selected':''}"
+        style="background:${c}" data-action="cat-color" data-k="${r.k}" data-v="${c}" title="${c}"></button>`).join('')}</div>`:'';
+    return `<div class="cat-edit-row">
+    <div class="cat-color-anchor">
+      <button type="button" class="cat-color-trigger" style="background:${r.color}" data-action="cat-color-toggle" data-k="${r.k}" title="选择颜色"></button>
+      ${palette}
+    </div>
+    <input class="cat-name-input" type="text" maxlength="12" placeholder="分类名称" value="${r.name.replace(/"/g,'&quot;')}"
+      data-action="cat-name" data-k="${r.k}" />
+    <button type="button" class="cat-row-del" data-action="cat-del" data-k="${r.k}" title="移除此行">×</button>
+  </div>`; }).join('')+`<button type="button" class="cat-add-row" data-action="cat-add-row">+ 再加一个</button>`;
+}
+function openCatModal(){ catRows=[catRow()]; catOpenPalette=null; renderCatRows(); document.getElementById('catModal').classList.add('show');
+  requestAnimationFrame(()=>{const i=document.querySelector('#catRows .cat-name-input');if(i)i.focus();}); }
+function closeCatModal(){ catOpenPalette=null; document.getElementById('catModal').classList.remove('show'); }
+function saveCatModal(){
+  // 直接从 DOM 读取输入框实时值，规避输入法 composition 未提交导致的状态不同步
+  const inputs=[...document.querySelectorAll('#catRows .cat-name-input')]
+    .map(i=>({name:(i.value||'').trim(),color:(catRows.find(r=>r.k===+i.dataset.k)||{}).color}))
+    .filter(x=>x.name);
+  if(!inputs.length){ say('请至少填写一个分类名称'); return; }
+  const exist=new Set(categories.map(c=>c.name)); let added=0;
+  inputs.forEach(x=>{ if(x.name&&!exist.has(x.name)&&x.color){ exist.add(x.name); categories.push({name:x.name,color:x.color}); added++; } });
+  closeCatModal();
+  if(added){ render(); say('已保存 '+added+' 个分类'); }  // 分类纳入指纹，变更自动标记未同步
+  else say('分类已存在，未重复添加');
+}
+
+/* ---------- 删除确认 ---------- */
+function openDel(){const t=findTask(state.confirmDelete);
+  document.getElementById('delBody').textContent='确定要删除「'+(t?t.title:'')+'」吗？将记入墓碑并在下次同步生效。';
+  document.getElementById('delModal').classList.add('show');}
+function closeDel(){state.confirmDelete=null;document.getElementById('delModal').classList.remove('show');}
+
+/* ---------- 键盘 ---------- */
+document.addEventListener('keydown',e=>{
+  const inSub=e.target&&e.target.id==='inlineSubInput';
+  const inEdit=e.target&&e.target.id==='inlineEditInput';
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='n'&&!inSub&&!inEdit){e.preventDefault();focusAdd();}
+  else if(e.key==='Enter'&&inSub){e.preventDefault();submitInlineSub(e.target);}
+  else if(e.key==='Enter'&&inEdit){e.preventDefault();submitInlineEdit(e.target);}
+  else if(e.key==='Enter'&&e.target&&e.target.id==='qaInput'){e.preventDefault();quickAdd();}
+  else if(e.key==='Escape'){
+    hideChartTip();
+    if(state.inlineEditFor)cancelInlineEdit();
+    else if(state.inlineSubFor)cancelInlineSub();
+    else {closeDel();ctx.style.display='none';}
+  }
+});
+
+/* =====================================================================
+ *  doit-gpui 设计层逻辑：抽屉 / Tab / 组件映射标注（不干扰原型业务交互）
+ * ===================================================================== */
+(function(){
+  const drawer=document.getElementById('gDrawer');
+  const backdrop=document.getElementById('gBackdrop');
+  const overlay=document.getElementById('gOverlay');
+  const mapBtn=document.getElementById('gMapBtn');
+
+  function openDrawer(){drawer.classList.add('show');backdrop.classList.add('show');}
+  function closeDrawer(){drawer.classList.remove('show');backdrop.classList.remove('show');}
+
+  document.addEventListener('click',e=>{
+    const g=e.target.closest('[data-g]');
+    if(g){
+      const a=g.dataset.g;
+      if(a==='drawer'){openDrawer();return;}
+      if(a==='drawer-close'){closeDrawer();return;}
+      if(a==='map'){
+        const on=document.body.classList.toggle('g-map-on');
+        g.classList.toggle('on',on);
+        if(on)drawMap(); else overlay.innerHTML='';
+        return;
+      }
+    }
+    const tab=e.target.closest('[data-gtab]');
+    if(tab){
+      document.querySelectorAll('[data-gtab]').forEach(t=>t.classList.toggle('active',t===tab));
+      document.querySelectorAll('[data-gpane]').forEach(p=>p.classList.toggle('active',p.dataset.gpane===tab.dataset.gtab));
+      return;
+    }
+    if(e.target===backdrop)closeDrawer();
+  });
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape')closeDrawer(); });
+
+  /* 组件映射标注：按选择器给当前可见区域绘制虚线框 + 标签 */
+  const MAP_RULES=[
+    {sel:'#topbar .tb-inner',   label:'Toolbar · Tabs · Badge',   kind:'ok'},
+    {sel:'.filterbar',          label:'Scrollable · Button',       kind:'ok'},
+    {sel:'.task',               label:'List · VirtualList 自绘',   kind:'custom', limit:2},
+    {sel:'.prio-tag',           label:'Tag · Badge',              kind:'ok',     limit:1},
+    {sel:'.task-ring',          label:'svg circle 自绘',          kind:'custom', limit:1},
+    {sel:'.qa-bar',             label:'Input · Popover · Dropdown',kind:'ok'},
+    {sel:'.stat-card',          label:'GroupBox + Chart',         kind:'ok',     limit:1},
+    {sel:'.heat',               label:'热力图无组件 · 自绘',       kind:'limited'},
+    {sel:'.cal-panel',          label:'Calendar · List',          kind:'ok'},
+    {sel:'.set-section',        label:'Form · Switch · Radio',    kind:'ok',     limit:2}
+  ];
+  function drawMap(){
+    overlay.innerHTML='';
+    const bodyRect={w:window.innerWidth,h:window.innerHeight};
+    MAP_RULES.forEach(r=>{
+      let nodes;
+      try{ nodes=document.querySelectorAll(r.sel); }catch(_){return;}
+      // 默认只标注 1 个代表元素；limit 指定最多标注数量，避免同类元素堆叠成视觉噪音
+      const list=Array.from(nodes).slice(0,r.limit||1);
+      list.forEach((n)=>{
+        const b=n.getBoundingClientRect();
+        if(b.width<6||b.height<6||b.bottom<0||b.top>bodyRect.h||b.right<0||b.left>bodyRect.w)return;
+        const box=document.createElement('div');
+        box.className='g-tag '+r.kind;
+        box.style.left=(b.left-3)+'px'; box.style.top=(b.top-3)+'px';
+        box.style.width=(b.width+6)+'px'; box.style.height=(b.height+6)+'px';
+        const lbl=document.createElement('span'); lbl.className='lbl'; lbl.textContent=r.label;
+        // 靠右的元素标签改到左上，避免溢出视口
+        if(b.right>bodyRect.w-160){ lbl.style.left='auto'; lbl.style.right='-1.5px'; lbl.style.borderRadius='6px 6px 0 6px'; }
+        box.appendChild(lbl); overlay.appendChild(box);
+      });
+    });
+  }
+  let mapTimer=null;
+  function startMap(){
+    if(mapTimer)return;
+    drawMap();
+    // 低频兜底刷新：应对 render() 重建 DOM / 页面切换；不逐帧重建，避免干扰原型动画
+    mapTimer=setInterval(()=>{
+      if(document.body.classList.contains('g-map-on'))drawMap();
+      else{clearInterval(mapTimer);mapTimer=null;}
+    },350);
+  }
+  mapBtn.addEventListener('click',()=>{
+    setTimeout(()=>{
+      if(document.body.classList.contains('g-map-on'))startMap();
+      else{ if(mapTimer){clearInterval(mapTimer);mapTimer=null;} overlay.innerHTML=''; }
+    },0);
+  });
+  window.addEventListener('resize',()=>{ if(document.body.classList.contains('g-map-on'))drawMap(); });
+  // 滚动（含 #main 内部滚动，用捕获）时同步标注位置
+  document.addEventListener('scroll',()=>{ if(document.body.classList.contains('g-map-on'))drawMap(); },true);
+})();
+
+/* ---------- 初始化 ---------- */
+document.getElementById('xicon2').innerHTML=svg('close');
+document.getElementById('xiconCat').innerHTML=svg('close');
+applyProgressColor();
+render();
+</script>
+</body>
+</html>
