@@ -5,7 +5,7 @@ use crate::theme::palette::metrics;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputContentType};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::component::{Disableable, Theme, ThemeMode};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use gpui_kit::Hsla;
@@ -26,11 +26,19 @@ pub fn render_settings(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
     let prog_color = state.read(cx).settings.progress_color.clone();
     let webdav_enabled = state.read(cx).settings.webdav.enabled;
     let sync_status = state.read(cx).sync_status.clone();
+    let (status_text, status_warn) = crate::ui::sync_badge(&sync_status);
 
     // WebDAV 三个输入框
     let url_state = state.read(cx).webdav_url.clone();
     let user_state = state.read(cx).webdav_user.clone();
     let pass_state = state.read(cx).webdav_pass.clone();
+
+    // 服务器地址 / 账号 / 密码 是否都已填写（用于保存按钮可用性）
+    let url_cur = url_state.read(cx).value();
+    let user_cur = user_state.read(cx).value();
+    let pass_cur = pass_state.read(cx).value();
+    let fields_ready =
+        !url_cur.trim().is_empty() && !user_cur.trim().is_empty() && !pass_cur.trim().is_empty();
 
     div()
         .w_full()
@@ -120,10 +128,10 @@ pub fn render_settings(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .flex().items_center().gap(px(7.0))
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if sync_status == "dirty" { p.warn } else { p.mint })
+                        .text_color(if status_warn { p.warn } else { p.mint })
                         .child(svg().data(&crate::ui::icons::cloud()).w(px(16.0)).h(px(16.0))
-                            .text_color(if sync_status == "dirty" { p.warn } else { p.mint }))
-                        .child(if sync_status == "dirty" { "有未同步更改" } else { "已同步" })
+                            .text_color(if status_warn { p.warn } else { p.mint }))
+                        .child(status_text)
                 ))
                 .child(field("启用同步", p, cx, {
                     let s = state.clone();
@@ -133,7 +141,16 @@ pub fn render_settings(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .on_change(move |checked, _window, cx: &mut App| {
                             s.update(cx, |st, cx| {
                                 st.settings.webdav.enabled = *checked;
-                                st.notify_msg(if *checked { "已启用 WebDAV 同步" } else { "已关闭 WebDAV 同步" });
+                                if !*checked {
+                                    st.sync_status = "off".into();
+                                } else if !st.synced_once {
+                                    // 对齐桌面端：开启但尚未验证 → ready（已开启暂未同步）
+                                    st.sync_status = "ready".into();
+                                } else {
+                                    st.sync_status = "synced".into();
+                                }
+                                st.save_settings();
+                                st.notify_msg(if *checked { "已启用 WebDAV 同步，点击右上角同步按钮或「保存并同步」拉取数据" } else { "已关闭 WebDAV 同步" });
                                 cx.notify();
                             });
                         })
@@ -160,6 +177,9 @@ pub fn render_settings(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                         .pt(px(12.0))
                         .child({
                             let s = state.clone();
+                            let url = url_state.clone();
+                            let user = user_state.clone();
+                            let pass = pass_state.clone();
                             Button::new("webdav-test")
                                 .label("测试连接")
                                 .custom(
@@ -172,9 +192,26 @@ pub fn render_settings(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                 .border_1()
                                 .border_color(p.line)
                                 .on_click(move |_, _window, cx: &mut App| {
+                                    let u = url.read(cx).value().to_string();
+                                    let n = user.read(cx).value().to_string();
+                                    let w = pass.read(cx).value().to_string();
+                                    let miss = if u.trim().is_empty() {
+                                        Some("服务器地址")
+                                    } else if n.trim().is_empty() {
+                                        Some("账号")
+                                    } else if w.trim().is_empty() {
+                                        Some("密码 / 令牌")
+                                    } else {
+                                        None
+                                    };
+                                    let s2 = s.clone();
                                     s.update(cx, |st, cx| {
-                                        st.notify_msg("连接测试将在接入 WebDAV 客户端后生效");
-                                        cx.notify();
+                                        if let Some(which) = miss {
+                                            st.notify_msg(format!("请先填写{which}，再测试连接"));
+                                            cx.notify();
+                                        } else {
+                                            st.test_webdav(&u, &n, &w, &s2, cx);
+                                        }
                                     });
                                 })
                         })
@@ -192,18 +229,29 @@ pub fn render_settings(state: &Entity<AppState>, cx: &App) -> impl IntoElement {
                                         .hover(Hsla::from(p.mint_deep))
                                         .active(Hsla::from(p.mint_deep)),
                                 )
+                                // 服务器地址 / 账号 / 密码都填写后才可点击
+                                .disabled(!fields_ready)
                                 .on_click(move |_, _window, cx: &mut App| {
                                     let u = url.read(cx).value().to_string();
                                     let n = user.read(cx).value().to_string();
                                     let w = pass.read(cx).value().to_string();
+                                    let miss = if u.trim().is_empty() {
+                                        Some("服务器地址")
+                                    } else if n.trim().is_empty() {
+                                        Some("账号")
+                                    } else if w.trim().is_empty() {
+                                        Some("密码 / 令牌")
+                                    } else {
+                                        None
+                                    };
+                                    let s2 = s.clone();
                                     s.update(cx, |st, cx| {
-                                        st.settings.webdav.url = u.trim().to_string();
-                                        st.settings.webdav.username = n.trim().to_string();
-                                        st.settings.webdav.password_ref =
-                                            if w.trim().is_empty() { None } else { Some(w.trim().to_string()) };
-                                        st.save();
-                                        st.notify_msg("配置已保存（WebDAV 客户端待接入）");
-                                        cx.notify();
+                                        if let Some(which) = miss {
+                                            st.notify_msg(format!("请先填写{which}，再保存并同步"));
+                                            cx.notify();
+                                        } else {
+                                            st.save_and_sync(&u, &n, &w, &s2, cx);
+                                        }
                                     });
                                 })
                         }),

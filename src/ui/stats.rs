@@ -339,7 +339,7 @@ fn ring_card(entries: &[CatSlice], p: &'static DoitPalette) -> impl IntoElement 
 
     let mut legend = div().flex().flex_col().gap(px(8.0)).text_size(px(13.0));
     for e in entries {
-        let hex = u32::from_str_radix(e.hex.trim_start_matches('#'), 16).unwrap_or(0x999999);
+        let hex = crate::domain::color::parse_color_or_default(&e.hex);
         legend = legend.child(
             div()
                 .flex()
@@ -364,8 +364,7 @@ fn ring_card(entries: &[CatSlice], p: &'static DoitPalette) -> impl IntoElement 
                 .inner_radius(35.0)
                 .value(move |e| e.count)
                 .color(move |e| {
-                    let hex = u32::from_str_radix(e.hex.trim_start_matches('#'), 16)
-                        .unwrap_or(0x999999);
+                    let hex = crate::domain::color::parse_color_or_default(&e.hex);
                     Hsla::from(rgb(hex))
                 })
                 .tooltip_name(move |e| SharedString::from(e.name.clone()))
@@ -443,7 +442,10 @@ fn category_entries(state: &Entity<AppState>, range: Range, cx: &App) -> Vec<Cat
             let hex = categories
                 .iter()
                 .find(|c| c.name == name)
-                .map_or_else(|| "#999999".to_string(), |c| c.color.clone());
+                .map_or_else(
+                    || crate::domain::color::DEFAULT_CATEGORY_COLOR.to_string(),
+                    |c| crate::domain::color::normalize_category_color(&c.color),
+                );
             CatSlice {
                 count: *by_cat.get(&name).unwrap_or(&0.0),
                 name,

@@ -1,3 +1,7 @@
+## 接手必读
+
+接手项目请先阅读 [AGENT.md](./AGENT.md)：它包含架构地图、SnapshotV2 数据契约、同步与合并语义、颜色规范、GPUI 平台陷阱和发版路径。用户视角说明见 [README.md](./README.md)。
+
 ## Agent skills
 
 ### Issue tracker

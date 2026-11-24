@@ -137,8 +137,9 @@ pub fn render_card(
             .categories
             .iter()
             .find(|c| c.name == t.category)
-            .and_then(|c| u32::from_str_radix(c.color.trim_start_matches('#'), 16).ok())
-            .unwrap_or(0x3FBB9C);
+            .map_or(crate::domain::color::DEFAULT_CATEGORY_COLOR_HEX, |c| {
+                crate::domain::color::parse_color_or_default(&c.color)
+            });
         side = side.child(
             div()
                 .px(px(9.0))

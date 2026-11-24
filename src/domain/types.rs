@@ -40,6 +40,10 @@ pub struct Category {
     pub color: String,
     pub sort_order: i64,
     pub updated_at: i64,
+    /// 删除墓碑（与手机端/桌面端契约一致）：同步合并据此识别删除，避免被旧快照复活。
+    /// 旧快照没有该字段，用 default 兼容。
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 /// 快照 v2（与手机/桌面端共用的 doit-backup.json 结构）
@@ -61,7 +65,7 @@ impl Default for SnapshotV2 {
             version: 2,
             revision: 0,
             exported_at: now_millis(),
-            device_id: String::new(),
+            device_id: "doit-gpui".to_string(),
             last_sync_at: None,
             categories: Vec::new(),
             tasks: Vec::new(),

@@ -112,15 +112,15 @@ fn category_trigger(
     let dot = if sel_cat == "全部" || cat_color.is_empty() {
         None
     } else {
-        u32::from_str_radix(cat_color.trim_start_matches('#'), 16)
-            .ok()
-            .map(|hex| {
-                div()
-                    .w(px(9.0))
-                    .h(px(9.0))
-                    .rounded_full()
-                    .bg(rgb(hex))
-            })
+        // 无 # 的历史色归一化后仍可显示；非法色回退默认薄荷绿
+        let hex = crate::domain::color::parse_color_or_default(cat_color);
+        Some(
+            div()
+                .w(px(9.0))
+                .h(px(9.0))
+                .rounded_full()
+                .bg(rgb(hex)),
+        )
     };
     div()
         .id("qa-cat")
@@ -267,14 +267,13 @@ fn cat_option(
 ) -> impl IntoElement {
     let s = state.clone();
     let target = name.to_string();
-    let dot = color.and_then(|hex| {
-        u32::from_str_radix(hex.trim_start_matches('#'), 16).ok().map(|h| {
-            div()
-                .w(px(9.0))
-                .h(px(9.0))
-                .rounded_full()
-                .bg(rgb(h))
-        })
+    let dot = color.map(|hex| {
+        let h = crate::domain::color::parse_color_or_default(&hex);
+        div()
+            .w(px(9.0))
+            .h(px(9.0))
+            .rounded_full()
+            .bg(rgb(h))
     });
     div()
         .id(format!("qa-cat-opt-{name}"))

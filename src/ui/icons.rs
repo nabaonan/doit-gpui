@@ -42,6 +42,14 @@ pub fn cloud() -> Vec<u8> {
 pub fn cloud_ok() -> Vec<u8> {
     icon("<path d=\"M7 18a4 4 0 010-8 5 5 0 019-2 4 4 0 011 10H7z\"/><path d=\"M9.4 13.2l2.2 2.2 4.3-4.4\" stroke-width=\"2\"/>")
 }
+/// 有本地更改待同步：云中间改为上传箭头（对齐桌面端 cloudDirty）。
+pub fn cloud_dirty() -> Vec<u8> {
+    icon("<path d=\"M7 18a4 4 0 010-8 5 5 0 019-2 4 4 0 011 10H7z\"/><path d=\"M12.4 15.9V10.5M10.1 12.8l2.3-2.3 2.3 2.3\" stroke-width=\"1.8\"/>")
+}
+/// 同步中：环形双向箭头（对齐桌面端 sync 图标）。
+pub fn sync() -> Vec<u8> {
+    icon("<path d=\"M4 12a8 8 0 0114-5l2 2M20 12a8 8 0 01-14 5l-2-2\"/><path d=\"M18 5v4h-4M6 19v-4h4\"/>")
+}
 pub fn trash() -> Vec<u8> {
     icon("<path d=\"M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13\"/>")
 }

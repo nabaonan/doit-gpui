@@ -45,5 +45,6 @@
 
 pub mod app;
 pub mod domain;
+pub mod sync;
 pub mod theme;
 pub mod ui;

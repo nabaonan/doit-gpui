@@ -230,9 +230,9 @@ impl SnapshotV2 {
         }
     }
 
-    /// 分类内置色卡（与 tui/手机端一致，新增分类轮转取色）
+    /// 分类内置色卡（与手机端/桌面端一致，新 8 色，新增分类轮转取色）
     pub const CAT_PALETTE: [&str; 8] = [
-        "#4A86D6", "#4FBF9E", "#EF9F27", "#DE5B55", "#7F77DD", "#D4537E", "#1D9E75", "#3AA6C9",
+        "#34C7A8", "#5AA9E6", "#F2A65A", "#A78BFA", "#22B8CF", "#F08A8A", "#AACB5E", "#7C96B0",
     ];
     /// 删除分类时任务迁入的默认分类
     pub const DEFAULT_CATEGORY: &str = "默认";
@@ -261,10 +261,15 @@ impl SnapshotV2 {
             let color = if let Some(c) = picked_color {
                 c.clone()
             } else {
-                let used: Vec<&str> = self.categories.iter().map(|c| c.color.as_str()).collect();
+                // 历史色可能不带 #，先归一化再比对，否则会误判为「已占用」
+                let used: Vec<String> = self
+                    .categories
+                    .iter()
+                    .map(|c| super::color::normalize_category_color(&c.color))
+                    .collect();
                 Self::CAT_PALETTE
                     .iter()
-                    .find(|c| !used.contains(c))
+                    .find(|c| !used.iter().any(|u| u.eq_ignore_ascii_case(c)))
                     .unwrap_or(&Self::CAT_PALETTE[7])
                     .to_string()
             };
@@ -274,6 +279,7 @@ impl SnapshotV2 {
                 color,
                 sort_order: (self.categories.len()) as i64,
                 updated_at: now,
+                deleted_at: None,
             });
             added += 1;
         }
@@ -325,7 +331,8 @@ impl SnapshotV2 {
             if !c.is_empty() {
                 let now = now_millis();
                 if let Some(idx) = self.categories.iter().position(|x| x.name == new.trim()) {
-                    self.categories[idx].color = c.to_string();
+                    // 统一带 # 大写存储，避免历史色回显失败
+                    self.categories[idx].color = super::color::normalize_category_color(c);
                     self.categories[idx].updated_at = now;
                 }
             }

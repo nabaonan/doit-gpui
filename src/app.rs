@@ -87,7 +87,14 @@ pub struct AppState {
     pub filter: String,              // 分类筛选，"all" 表示全部
     pub store: SnapshotStore,
     pub toast: Option<String>,
-    pub sync_status: String,         // synced / dirty / off 等
+    /// 每次 notify_msg 自增；AppView 据此检测新 toast 并重新倒计时自动消失。
+    pub toast_seq: u64,
+    pub sync_status: String,         // synced / dirty / syncing / error / off / ready 等
+    /// 是否成功验证过连接或完成过一次同步（对齐桌面端 sync.verified）：
+    /// 未验证时顶栏显示「已开启暂未同步」(ready) 而不是误导性的「已同步」。
+    pub synced_once: bool,
+    /// 同步任务进行中（防止重复点击重复发起）
+    pub syncing: bool,
     pub collapsed: std::collections::HashSet<String>, // 折叠的任务 uid
     pub quick_input: Entity<InputState>, // 底部快速添加输入框状态
     pub quick_add_priority: u8,      // 快速添加默认优先级
@@ -136,7 +143,8 @@ impl AppState {
         } else {
             snapshot
         };
-        let settings = AppSettings::default();
+        // 从磁盘加载设置（主题/进度色/WebDAV 配置），首次启动或文件损坏时用默认值
+        let settings = store.load_settings().unwrap_or_default();
 
         let quick_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("添加待办，回车快速创建…"));
@@ -166,9 +174,12 @@ impl AppState {
             if !pass0.is_empty() {
                 s.set_value(pass0, window, cx);
             }
+            // 密码框加密展示（掩码），不显示明文
+            s.set_masked(true, window, cx);
             s
         });
 
+        let webdav_enabled = settings.webdav.enabled;
         let today = chrono::Local::now().date_naive();
         let first_cat = snapshot
             .categories
@@ -181,7 +192,11 @@ impl AppState {
             filter: "all".into(),
             store,
             toast: None,
-            sync_status: "dirty".into(),
+            toast_seq: 0,
+            // 与桌面端一致：开启但未验证过连接时显示 ready（已开启暂未同步），未开启则 off。
+            sync_status: if webdav_enabled { "ready".into() } else { "off".into() },
+            synced_once: false,
+            syncing: false,
             collapsed: std::collections::HashSet::new(),
             quick_input,
             quick_add_priority: crate::theme::palette::priority::NORMAL,
@@ -216,10 +231,171 @@ impl AppState {
     pub fn save(&mut self) {
         self.snapshot.exported_at = crate::domain::types::now_millis();
         let _ = self.store.save(&self.snapshot);
+        // 已启用同步时，任何本地编辑都标记为「有未同步更改 · 点击同步」。
+        // 同步完成回调里会在 save() 之后把状态重置为 synced。
+        if self.settings.webdav.enabled && !self.syncing {
+            self.sync_status = "dirty".into();
+        }
+    }
+
+    /// 持久化应用设置（主题/进度色/WebDAV 配置）。
+    /// 与快照分离存放，避免任务变更时的频繁写入覆盖设置。
+    pub fn save_settings(&self) {
+        let _ = self.store.save_settings(&self.settings);
     }
 
     pub fn notify_msg(&mut self, msg: impl Into<String>) {
         self.toast = Some(msg.into());
+        self.toast_seq = self.toast_seq.wrapping_add(1);
+    }
+
+    // ---------- WebDAV 同步 ----------
+
+    /// 「测试连接」：把输入框里的配置落到内存+磁盘，然后在后台线程真实探测 WebDAV 目录与鉴权。
+    /// 结果通过 toast 反馈到 UI。
+    pub fn test_webdav(&mut self, url: &str, user: &str, pass: &str, state: &Entity<AppState>, cx: &mut App) {
+        if self.syncing {
+            self.notify_msg("同步正在进行中，请稍候");
+            cx.notify(state.entity_id());
+            return;
+        }
+        self.settings.webdav.url = url.trim().to_string();
+        self.settings.webdav.username = user.trim().to_string();
+        self.settings.webdav.password_ref = if pass.trim().is_empty() {
+            None
+        } else {
+            Some(pass.trim().to_string())
+        };
+        self.save_settings();
+
+        let settings = self.settings.clone();
+        let pass_owned = pass.to_string();
+        let weak = state.downgrade();
+        cx.spawn(async move |cx| {
+            // ureq 是同步阻塞客户端，放到后台线程池执行，避免卡住 UI
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::sync::test_connection(&settings.webdav, &pass_owned) })
+                .await;
+            let _ = weak.update(cx, |st, cx| {
+                match result {
+                    Ok(ms) => {
+                        st.settings.webdav.enabled = true;
+                        st.save_settings();
+                        st.synced_once = true;
+                        st.sync_status = "synced".into();
+                        st.notify_msg(format!("连接成功（{ms} ms），配置已保存"));
+                    }
+                    Err(e) => {
+                        st.notify_msg(format!("连接失败：{e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        self.notify_msg("正在测试连接…");
+    }
+
+    /// 顶栏同步胶囊点击入口：用已保存的 WebDAV 配置直接同步，
+    /// 不需要先回到设置页重新填写/保存。
+    pub fn sync_now_entity(state: &Entity<AppState>, cx: &mut App) {
+        let target = state.clone();
+        state.update(cx, move |st, cx| st.sync_now(&target, cx));
+    }
+
+    /// 与桌面端 StatusPills 的点击行为一致：点击即同步。
+    /// 未开启或未配置时给出明确提示，不静默、也不进入 syncing 状态。
+    pub fn sync_now(&mut self, state: &Entity<AppState>, cx: &mut App) {
+        if self.syncing {
+            self.notify_msg("同步正在进行中，请稍候");
+            cx.notify(state.entity_id());
+            return;
+        }
+        if !self.settings.webdav.enabled || self.settings.webdav.url.trim().is_empty() {
+            self.notify_msg("尚未设置同步 · 请到设置页填写并开启 WebDAV 同步");
+            cx.notify(state.entity_id());
+            return;
+        }
+        let settings = self.settings.clone();
+        let pass = settings.webdav.password_ref.clone().unwrap_or_default();
+        self.run_sync(settings, pass, state, cx);
+    }
+
+    /// 后台执行完整同步（探测 → 拉取 → 三方合并 → 上传），成功后替换内存快照并落盘。
+    /// `save_and_sync` 与顶栏 `sync_now` 共用这条路径，避免两处行为漂移。
+    fn run_sync(
+        &mut self,
+        settings: AppSettings,
+        pass: String,
+        state: &Entity<AppState>,
+        cx: &mut App,
+    ) {
+        let local = self.snapshot.clone();
+        let base = self.store.load_sync_base();
+        let now = crate::domain::types::now_millis();
+        let weak = state.downgrade();
+
+        self.syncing = true;
+        self.sync_status = "syncing".into();
+        cx.notify(state.entity_id());
+
+        cx.spawn(async move |cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::sync::sync_once(&settings.webdav, &pass, &local, base.as_ref(), now)
+                })
+                .await;
+            let _ = weak.update(cx, |st, cx| {
+                st.syncing = false;
+                match result {
+                    Ok(outcome) => {
+                        st.snapshot = outcome.snapshot;
+                        st.snapshot.exported_at = crate::domain::types::now_millis();
+                        st.save();
+                        // 基线只记录本次成功同步的结果，供下次三方合并
+                        let _ = st.store.save_sync_base(&st.snapshot);
+                        st.synced_once = true;
+                        st.sync_status = "synced".into();
+                        st.notify_msg(if outcome.pulled {
+                            "同步完成，已拉取并合并远端数据"
+                        } else {
+                            "同步完成，本地快照已上传到服务器"
+                        });
+                    }
+                    Err(e) => {
+                        st.sync_status = "error".into();
+                        st.notify_msg(format!("同步失败：{e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        self.notify_msg("正在同步…");
+    }
+
+    /// 「保存并同步」：保存配置后，在后台线程执行完整同步。
+    pub fn save_and_sync(&mut self, url: &str, user: &str, pass: &str, state: &Entity<AppState>, cx: &mut App) {
+        if self.syncing {
+            self.notify_msg("同步正在进行中，请稍候");
+            cx.notify(state.entity_id());
+            return;
+        }
+        self.settings.webdav.url = url.trim().to_string();
+        self.settings.webdav.username = user.trim().to_string();
+        self.settings.webdav.password_ref = if pass.trim().is_empty() {
+            None
+        } else {
+            Some(pass.trim().to_string())
+        };
+        self.settings.webdav.enabled = true;
+        self.save_settings();
+
+        let settings = self.settings.clone();
+        let pass_owned = pass.to_string();
+        self.run_sync(settings, pass_owned, state, cx);
     }
 
     // ---------- 快速添加栏 ----------
@@ -335,15 +511,16 @@ impl AppState {
     /// 下一个未被现有分类占用的色卡索引（默认新行取色）
     fn next_free_cat_color_ix(&self) -> usize {
         use crate::domain::types::SnapshotV2;
-        let used: Vec<&str> = self
+        // 历史色可能不带 #，归一化后再比对，避免重复占用同一色卡
+        let used: Vec<String> = self
             .snapshot
             .categories
             .iter()
-            .map(|c| c.color.as_str())
+            .map(|c| crate::domain::color::normalize_category_color(&c.color))
             .collect();
         SnapshotV2::CAT_PALETTE
             .iter()
-            .position(|c| !used.contains(c))
+            .position(|c| !used.iter().any(|u| u.eq_ignore_ascii_case(c)))
             .unwrap_or(0)
     }
 
@@ -385,9 +562,10 @@ impl AppState {
             .find(|c| c.name == name)
             .and_then(|c| {
                 use crate::domain::types::SnapshotV2;
+                let normalized = crate::domain::color::normalize_category_color(&c.color);
                 SnapshotV2::CAT_PALETTE
                     .iter()
-                    .position(|h| h.eq_ignore_ascii_case(&c.color))
+                    .position(|h| h.eq_ignore_ascii_case(&normalized))
             })
             .unwrap_or(0);
         let input = new_cat_input(window, cx);
@@ -549,6 +727,8 @@ impl AppState {
 pub struct AppView {
     pub state: Entity<AppState>,
     _subscriptions: Vec<Subscription>,
+    /// 已为哪个 toast 序号安排过自动消失计时器（避免重复排期）
+    toast_timer_seq: u64,
 }
 
 impl AppView {
@@ -592,7 +772,30 @@ impl AppView {
                 input.update(cx, |i, cx| i.set_value("", window, cx));
             }
         });
-        Self { state, _subscriptions: vec![sub, sub2] }
+        // 观察 AppState：每次新 toast（seq 变化）时安排一次 2.2s 自动消失，
+        // 与原型 index.html 的 say() 行为一致。
+        let sub3 = cx.observe_in(&state, window, move |this, state, _window, cx| {
+            let seq = state.read(cx).toast_seq;
+            if seq == 0 || seq == this.toast_timer_seq {
+                return;
+            }
+            this.toast_timer_seq = seq;
+            let weak = state.downgrade();
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(2200))
+                    .await;
+                let _ = weak.update(cx, |st, cx| {
+                    // 仅清除仍是同一条 toast（seq 未再变化）的消息
+                    if st.toast_seq == seq {
+                        st.toast = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        });
+        Self { state, _subscriptions: vec![sub, sub2, sub3], toast_timer_seq: 0 }
     }
 }
 
@@ -678,6 +881,31 @@ impl Render for AppView {
                         }),
                 );
             }
+        }
+        // toast 提示：底部居中的深色胶囊，浮在最上层（对齐原型 #toast）
+        if let Some(msg) = self.state.read(cx).toast.clone() {
+            root = root.child(
+                div()
+                    .id("app-toast")
+                    .absolute()
+                    .bottom(px(28.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px(px(22.0))
+                            .py(px(12.0))
+                            .rounded(px(24.0))
+                            .bg(p.ink)
+                            .text_color(p.bg)
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .shadow_lg()
+                            .child(msg),
+                    ),
+            );
         }
         root
     }

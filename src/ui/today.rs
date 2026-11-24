@@ -87,7 +87,7 @@ pub fn render_cat_nav(state: &Entity<AppState>, filter: &str, cx: &App) -> impl 
         let s = state.clone();
         let name = c.name.clone();
         let active = filter == c.name;
-        let hex = u32::from_str_radix(c.color.trim_start_matches('#'), 16).unwrap_or(0x3FBB9C);
+        let hex = crate::domain::color::parse_color_or_default(&c.color);
         let accent = rgb(hex);
         let count = unfinished.get(&name).copied().unwrap_or(0);
 

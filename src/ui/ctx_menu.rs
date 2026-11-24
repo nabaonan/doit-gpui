@@ -181,8 +181,7 @@ fn category_submenu(
             let uid2 = uid.clone();
             let n = c.name.clone();
             let is_cur = n == now_owned;
-            let color = u32::from_str_radix(c.color.trim_start_matches('#'), 16)
-                .map_or(gpui_kit::rgb(0x3FBB9C), gpui_kit::rgb);
+            let color = gpui_kit::rgb(crate::domain::color::parse_color_or_default(&c.color));
             let label = n.clone();
             m = m.item(
                 PopupMenuItem::element(move |_w, _cx| dot_row(color, label.clone(), is_cur, p))

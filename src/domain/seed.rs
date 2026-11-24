@@ -47,10 +47,10 @@ pub fn demo_snapshot() -> SnapshotV2 {
             % 1_000_000
     );
     let categories = vec![
-        Category { name: "工作".into(), color: "#3FBB9C".into(), sort_order: 0, updated_at: now_millis() },
-        Category { name: "生活".into(), color: "#5B8DEF".into(), sort_order: 1, updated_at: now_millis() },
-        Category { name: "学习".into(), color: "#F2A65A".into(), sort_order: 2, updated_at: now_millis() },
-        Category { name: "采购".into(), color: "#C77DFF".into(), sort_order: 3, updated_at: now_millis() },
+        Category { name: "工作".into(), color: "#5AA9E6".into(), sort_order: 0, updated_at: now_millis(), deleted_at: None },
+        Category { name: "生活".into(), color: "#34C7A8".into(), sort_order: 1, updated_at: now_millis(), deleted_at: None },
+        Category { name: "学习".into(), color: "#A78BFA".into(), sort_order: 2, updated_at: now_millis(), deleted_at: None },
+        Category { name: "采购".into(), color: "#F2A65A".into(), sort_order: 3, updated_at: now_millis(), deleted_at: None },
     ];
 
     // t1 完成 Q4 季度复盘报告（含多级子任务）

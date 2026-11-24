@@ -4,9 +4,11 @@
 
 这是独立于 `doit-desktop` / `doit-desktop-prototype` 的**全新项目**，不修改任何原有项目。
 
+开发约束、数据契约、同步语义和接手须知见 [AGENT.md](./AGENT.md)。
+
 ## 当前状态：可运行的应用骨架（研发进行中）
 
-已落地约 3100 行 Rust 代码，编译通过、可启动、25 个单元测试全绿。
+已落地约 3100 行 Rust 代码，编译通过、可启动、40 个单元测试全绿。
 
 ### ✅ 已完成
 
@@ -26,12 +28,12 @@
 | 设置页 | 主题切换（同时驱动自绘色板 + gpui 组件主题）、**完成进度风格色板按设计稿改为「同色描边环 + 白色内环 + 白色对钩」**、**WebDAV 完整设置区**（同步状态 / 启用开关 / 服务器地址 / 账号 / 密码令牌 / 测试连接 / 保存并同步）、开机自启开关 | `src/ui/settings.rs` |
 | 添加分类弹框 | **用 gpui-kit 自带 `Dialog` 组件 + 显式 `DialogFooter`（保存/取消 Button）** 实现添加 / 编辑 / 删除确认；添加入口弹框内每行左侧色块点击弹**颜色气泡**（一整行内置 CAT_PALETTE 8 色，选中效果与设置页「完成进度风格」一致：同色描边环+白色内环+白色对钩）；「再添一个」用 gpui-kit Button | `src/ui/cat_dialog.rs`、`src/app.rs` |
 | 全局质感 | **gpui-component 组件主题的 focus ring / input 边框 / accent 统一覆盖为薄荷绿**（亮暗各适配，启动与切主题时同步）；**页面切换 180ms 淡入动画**（id 随页变化重播）；**内容区用 gpui-kit `Scrollable`（`.overflow_y_scrollbar()`）滚动，超过页高自动滚动 + 右侧滚动条** | `src/app.rs` |
-| 测试 | 27 个单元测试（树构建/父子联动/完成单向/墓碑级联/子任务继承分类-指定优先级/**分类增删改（批量添加/重命名/删除-moved入默认）**/今日口径 + 月历网格/闰年/月份跨年/周一起始 + 卡片摊平与折叠 + 热力图周/月/年布局 + 区间口径 + 环形扇区几何 + 热力等级分档 + 右键菜单动作 rename/priority/category） | `src/domain/*.rs`、`src/ui/task_card.rs`、`src/ui/stats.rs`、`src/ui/ctx_menu.rs` |
+| 测试 | 40 个单元测试（数据类型 / 颜色归一化 / 快照校验 / 任务树与父子联动 / 墓碑级联 / 今日口径 / 日期与月历 / WebDAV 合并语义 / 卡片摊平与折叠 / 热力图与区间口径） | `src/domain/*.rs`、`src/sync.rs`、`src/ui/task_card.rs`、`src/ui/stats.rs` |
 
 ### 🚧 待接入（后续迭代，非阻塞）
 
 - **系统集成**：托盘图标、关闭隐藏到托盘、单实例、开机自启的实际写入、窗口状态记忆（需 `tray-icon` 及平台 crate）。
-- **WebDAV 同步**：三方合并 LWW、墓碑传播、系统钥匙串存凭据、真实连接测试（数据层已预留 `WebDavSettings`，UI 已可录入）。
+- **WebDAV 同步增强**：凭据改用系统钥匙串、代理探测与更细的错误提示（当前密码保存在 `settings.json`，钥匙串待接入）。
 - **应用内更新**：GitHub Releases 检查与下载。
 - **交互细节**：长按完成动效、展开折叠状态持久化、分类管理弹窗。
 - **原生感**：macOS 标题栏与窗口配置（现用 GPUI 默认窗口）。
@@ -43,12 +45,25 @@
 环境要求：Rust ≥ 1.85（本地实测 1.98.1）；macOS 需 `font-kit`（gpui-kit 已通过 platform 传递启用）。
 
 ```bash
-cargo build   # 首次编译依赖较多（约 8 分钟、790 个 crate），之后增量编译秒级
-cargo run     # 运行
-cargo test    # 25 个单元测试
+cargo build        # 首次编译依赖较多（约 8 分钟、790 个 crate），之后增量编译秒级
+cargo run          # 运行
+cargo test         # 40 个单元测试
+cargo test --offline  # 缓存完备时避免联网解析
 ```
 
 首次启动会在 `~/Library/Application Support/doit-gpui/` 写入 `doit-backup.json`；无快照时注入演示数据（与原型一致），可直接看到完整界面。
+
+## 发版
+
+本目录是本地开发版，不是 git 仓库；发版在已发布仓库 `nabaonan/doit-gpui` 进行：
+
+1. 把 `src/`、`Cargo.toml`、`Cargo.lock`、`README.md`、`AGENT.md`、`index.html` 同步到已发布仓库
+2. 保留该仓库的 `scripts/release.sh`、`.github/workflows/release.yml`、`packaging/` 和 `LICENSE`
+3. `git fetch --tags`，确认远端最新版本
+4. `./scripts/release.sh patch --dry-run` 预览版本与变更日志
+5. `./scripts/release.sh patch` 提交版本变更并推送 `v*` tag，CI 构建三平台产物并发布 Release
+
+日常改动只提交代码，不自动发版。详细约定见 [AGENT.md](./AGENT.md)。
 
 ## 产品原型（HTML）
 

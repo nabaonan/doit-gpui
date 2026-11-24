@@ -83,12 +83,9 @@ pub fn open_edit(state: &Entity<AppState>, name: &str, window: &mut Window, cx: 
                 let bubble_open = st_content.read(cx).cat_color_open == Some(0);
                 let input_el: Option<AnyElement> =
                     input.map(|i| Input::new(&i).flex_1().h(px(36.0)).into_any_element());
-                let hex = u32::from_str_radix(
-                    crate::domain::types::SnapshotV2::CAT_PALETTE[color_ix % 8]
-                        .trim_start_matches('#'),
-                    16,
-                )
-                .unwrap_or(0x999999);
+                let hex = crate::domain::color::parse_color_or_default(
+                    crate::domain::types::SnapshotV2::CAT_PALETTE[color_ix % 8],
+                );
                 let s2 = st_content.clone();
                 let row = div()
                     .id("cat-edit-row")
@@ -238,12 +235,9 @@ fn rows_block(
     for (i, color_ix) in rows {
         let i = *i;
         let color_ix = *color_ix;
-        let hex = u32::from_str_radix(
-            crate::domain::types::SnapshotV2::CAT_PALETTE[color_ix % 8]
-                .trim_start_matches('#'),
-            16,
-        )
-        .unwrap_or(0x999999);
+        let hex = crate::domain::color::parse_color_or_default(
+            crate::domain::types::SnapshotV2::CAT_PALETTE[color_ix % 8],
+        );
         let s2 = st.clone();
         let row_input: Option<AnyElement> = st
             .read(cx)
@@ -332,7 +326,7 @@ fn color_bubble(
         .bg(p.card)
         .shadow_md();
     for (ix, hex) in crate::domain::types::SnapshotV2::CAT_PALETTE.iter().enumerate() {
-        let color = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0x999999);
+        let color = crate::domain::color::parse_color_or_default(hex);
         let on = ix == current;
         let s2 = s.clone();
         // 未选中：纯色圆角方块 + 淡描边；选中：同色描边环 + 白色内环 + 白色对钩
@@ -413,7 +407,7 @@ fn edit_color_bubble(
         .bg(p.card)
         .shadow_md();
     for (ix, hex) in crate::domain::types::SnapshotV2::CAT_PALETTE.iter().enumerate() {
-        let color = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0x999999);
+        let color = crate::domain::color::parse_color_or_default(hex);
         let on = ix == current;
         let s2 = s.clone();
         // 未选中：纯色圆角方块 + 淡描边；选中：同色描边环 + 白色内环 + 白色对钩
