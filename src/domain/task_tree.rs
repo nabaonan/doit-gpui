@@ -57,15 +57,24 @@ impl SnapshotV2 {
         build(None, &roots, &by_parent, filter_category)
     }
 
-    /// 今日可见的顶级任务树
-    pub fn today_tree(&self, filter_category: Option<&str>) -> Vec<TaskNode> {
+    /// 今日可见的顶级任务树；sort_by_priority 开启时只重排顶级节点，子任务顺序不变。
+    pub fn today_tree(
+        &self,
+        filter_category: Option<&str>,
+        sort_by_priority: bool,
+    ) -> Vec<TaskNode> {
         let today = start_of_today();
         let tree = self.build_tree(filter_category);
-        tree.into_iter()
+        let mut out: Vec<TaskNode> = tree
+            .into_iter()
             .filter(|node| {
                 !node.task.done || node.task.completed_at.is_some_and(|c| c >= today)
             })
-            .collect()
+            .collect();
+        if sort_by_priority {
+            out.sort_by(|a, b| b.task.priority.cmp(&a.task.priority)); // 稳定排序：同级保序
+        }
+        out
     }
 
     /// 查找任务（可变）
@@ -119,9 +128,12 @@ impl SnapshotV2 {
             }
             let all_done = children.iter().all(|c| c.done);
             if let Some(parent) = self.find_mut(&parent_uid) {
-                parent.done = all_done;
-                parent.completed_at = if all_done { Some(start_of_today()) } else { None };
-                parent.updated_at = now_millis();
+                // 只在状态真正翻转时改完成时间与 updated_at：载入/同步后的全量自愈不应反复刷新时间戳。
+                if all_done != parent.done {
+                    parent.done = all_done;
+                    parent.completed_at = if all_done { Some(start_of_today()) } else { None };
+                    parent.updated_at = now_millis();
+                }
                 current.clone_from(&parent.parent_uid);
             } else {
                 break;
@@ -129,8 +141,17 @@ impl SnapshotV2 {
         }
     }
 
+    /// 载入 / 同步后自愈：删子任务没重算父任务、或同步拉入远端墓碑时留下的脏完成态。
+    pub fn recalc_all(&mut self) {
+        let ids: Vec<String> = self.tasks.iter().map(|t| t.uid.clone()).collect();
+        for id in ids {
+            self.recalc_up(&id);
+        }
+    }
+
     /// 标记删除（墓碑），级联子树
     pub fn mark_deleted(&mut self, uid: &str) {
+        let parent_uid = self.find(uid).and_then(|t| t.parent_uid.clone());
         let now = now_millis();
         if let Some(t) = self.find_mut(uid) {
             t.deleted_at = Some(now);
@@ -149,6 +170,11 @@ impl SnapshotV2 {
                 }
             }
             i += 1;
+        }
+        // 删掉的子任务可能就是最后一个未完成的：剩余若全完成，父任务要立即完成。
+        if parent_uid.is_some() {
+            // recalc_up 从「子任务」出发冒到它的父任务；删除节点本身仍在索引里（墓碑保留 parent_uid）。
+            self.recalc_up(uid);
         }
     }
 
@@ -252,19 +278,19 @@ impl SnapshotV2 {
         for (raw, picked_color) in rows {
             let name = raw.trim();
             if name.is_empty()
-                || self.categories.iter().any(|c| c.name == name)
+                || self.visible_category_names().contains(name)
                 || name == "全部"
             {
                 continue;
             }
-            // 显式指定颜色则用之；否则取第一个未被占用的色卡色
+            // 显式指定颜色则用之；否则取第一个未被可见分类占用的色卡色
             let color = if let Some(c) = picked_color {
                 c.clone()
             } else {
                 // 历史色可能不带 #，先归一化再比对，否则会误判为「已占用」
                 let used: Vec<String> = self
-                    .categories
-                    .iter()
+                    .visible_categories()
+                    .into_iter()
                     .map(|c| super::color::normalize_category_color(&c.color))
                     .collect();
                 Self::CAT_PALETTE
@@ -277,7 +303,8 @@ impl SnapshotV2 {
             self.categories.push(crate::domain::types::Category {
                 name: name.to_string(),
                 color,
-                sort_order: (self.categories.len()) as i64,
+                // 墓碑占位可能导致数组长度虚高，故基于可见分类个数计算 sortOrder（对齐桌面端）
+                sort_order: (self.visible_category_count()) as i64,
                 updated_at: now,
                 deleted_at: None,
             });
@@ -295,7 +322,7 @@ impl SnapshotV2 {
         let new = new.trim();
         if new.is_empty()
             || new == "全部"
-            || self.categories.iter().any(|c| c.name == new && c.name != old)
+            || (new != old && self.visible_category_names().contains(new))
         {
             return false;
         }
@@ -340,14 +367,20 @@ impl SnapshotV2 {
         true
     }
 
-    /// 删除分类：其下任务（含子任务归属）移入「默认」，任务 updated_at 刷新。
-    /// 返回移除的任务数。
+    /// 删除分类（墓碑式，对齐桌面端 removeCategory）：保留分类条目并写 deleted_at 墓碑，
+    /// 供跨端同步把删除意图传播到远端/其它设备；其下任务（含子任务归属）移入「默认」，
+    /// 任务 updated_at 刷新。返回移除的任务数。
     pub fn delete_category(&mut self, name: &str) -> usize {
         let Some(idx) = self.categories.iter().position(|c| c.name == name) else {
             return 0;
         };
-        self.categories.remove(idx);
         let now = now_millis();
+        // 墓碑式删除：不物理移除，写墓碑并刷新 updated_at（同步契约据此识别删除）
+        if self.categories[idx].deleted_at.is_some() {
+            return 0; // 已是墓碑，幂等
+        }
+        self.categories[idx].deleted_at = Some(now);
+        self.categories[idx].updated_at = now;
         let mut moved = 0usize;
         for t in &mut self.tasks {
             if t.category == name {
@@ -358,6 +391,28 @@ impl SnapshotV2 {
         }
         self.revision += 1;
         moved
+    }
+
+    /// 可见分类（过滤删除墓碑），供 UI 展示 / 重名判断 / 色卡分配使用。
+    /// 墓碑分类仅存在于快照契约中用于同步合并，不参与日常渲染与选择。
+    pub fn visible_categories(&self) -> Vec<&crate::domain::types::Category> {
+        self.categories
+            .iter()
+            .filter(|c| c.deleted_at.is_none())
+            .collect()
+    }
+
+    /// 可见分类名集合（过滤墓碑），用于 add/rename 的重名判断。
+    pub fn visible_category_names(&self) -> std::collections::HashSet<&str> {
+        self.visible_categories()
+            .into_iter()
+            .map(|c| c.name.as_str())
+            .collect()
+    }
+
+    /// 可见分类数量（墓碑占位不计数，用于 sortOrder 计算）。
+    pub fn visible_category_count(&self) -> usize {
+        self.categories.iter().filter(|c| c.deleted_at.is_none()).count()
     }
 
     /// 把 sort_order=-1 的新建项回退为索引，保证顺序稳定
@@ -409,6 +464,41 @@ mod tests {
     }
 
     #[test]
+    fn urgent_priority_sorts_only_top_level() {
+        let mut tasks = vec![
+            mk("a", None, "工作"),
+            mk("b", None, "工作"),
+            mk("c", None, "工作"),
+            mk("d", None, "工作"),
+            mk("s1", Some("b"), "工作"),
+            mk("s2", Some("b"), "工作"),
+        ];
+        for (i, t) in tasks.iter_mut().enumerate() {
+            t.sort_order = i as i64;
+        }
+        tasks[0].priority = 0;
+        tasks[1].priority = 4;
+        tasks[2].priority = 2;
+        tasks[3].priority = 4;
+        tasks[4].priority = 0;
+        tasks[5].priority = 4;
+        let s = SnapshotV2 {
+            tasks,
+            ..SnapshotV2::default()
+        };
+
+        let sorted = s.today_tree(None, true);
+        let uids: Vec<&str> = sorted.iter().map(|n| n.task.uid.as_str()).collect();
+        assert_eq!(uids, vec!["b", "d", "c", "a"], "顶级稳定降序，同级保序");
+        let subs: Vec<&str> = sorted[0].subs.iter().map(|n| n.task.uid.as_str()).collect();
+        assert_eq!(subs, vec!["s1", "s2"], "子任务顺序不应被重排");
+
+        let manual = s.today_tree(None, false);
+        let uids: Vec<&str> = manual.iter().map(|n| n.task.uid.as_str()).collect();
+        assert_eq!(uids, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
     fn completing_all_subs_completes_parent() {
         let s = SnapshotV2 {
             tasks: vec![
@@ -450,6 +540,33 @@ mod tests {
     }
 
     #[test]
+    fn deleting_last_undone_sub_completes_parent() {
+        let mut done = mk("c1", Some("p"), "工作");
+        done.done = true;
+        let mut s = SnapshotV2 {
+            tasks: vec![mk("p", None, "工作"), done, mk("c2", Some("p"), "工作")],
+            ..SnapshotV2::default()
+        };
+        s.mark_deleted("c2");
+        assert!(s.find("p").unwrap().done, "删掉最后一个未完成任务后父任务应自动完成");
+        assert_eq!(s.find("p").unwrap().completed_at, Some(start_of_today()));
+    }
+
+    #[test]
+    fn recalc_all_heals_tombstoned_sub_from_snapshot() {
+        let mut done = mk("c1", Some("p"), "工作");
+        done.done = true;
+        let mut deleted = mk("gone", Some("p"), "工作");
+        deleted.deleted_at = Some(200);
+        let mut s = SnapshotV2 {
+            tasks: vec![mk("p", None, "工作"), done, deleted],
+            ..SnapshotV2::default()
+        };
+        s.recalc_all();
+        assert!(s.find("p").unwrap().done, "墓碑子任务不应阻塞父任务完成");
+    }
+
+    #[test]
     fn create_sub_inherits_parent_category_uses_given_priority() {
         let mut p = mk("p", None, "学习");
         p.priority = 4;
@@ -483,11 +600,22 @@ mod tests {
         let _ = s.add_categories(&["生活".to_string()]);
         assert!(!s.rename_category("出差", "生活"));
 
-        // 删除：任务移入默认
+        // 删除：墓碑式——分类条目保留并打墓碑（供同步契约传播删除意图），
+        // UI 通过可见分类过滤；任务移入默认。
         let moved = s.delete_category("出差");
         assert_eq!(moved, 1);
-        assert!(s.categories.iter().all(|c| c.name != "出差"));
+        let gone = s.categories.iter().find(|c| c.name == "出差").unwrap();
+        assert!(gone.deleted_at.is_some(), "删除应写墓碑而非物理移除");
+        assert!(
+            s.visible_categories().iter().all(|c| c.name != "出差"),
+            "墓碑分类不应出现在可见分类中"
+        );
         assert_eq!(s.find("t").unwrap().category, SnapshotV2::DEFAULT_CATEGORY);
+        // 墓碑分类名可复用：再次添加同名分类应成功
+        let re_added = s.add_categories(&["出差".to_string()]);
+        assert_eq!(re_added, 1);
+        // 幂等：再删一次已墓碑的分类返回 0
+        assert_eq!(s.delete_category("出差"), 0);
     }
 
     #[test]
@@ -500,7 +628,7 @@ mod tests {
             tasks: vec![old, fresh],
             ..SnapshotV2::default()
         };
-        let tree = s.today_tree(None);
+        let tree = s.today_tree(None, false);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].task.uid, "fresh");
     }

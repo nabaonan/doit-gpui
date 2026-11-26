@@ -567,4 +567,117 @@ mod tests {
         let s = settings("", true);
         assert!(test_connection(&s, "pw").is_err());
     }
+
+    // ---- 分类墓碑同步用例（对齐桌面端 visibleCategories / 墓碑删除） ----
+
+    fn cat(name: &str, color: &str, sort: i64, updated: i64) -> Category {
+        Category {
+            name: name.into(),
+            color: color.into(),
+            sort_order: sort,
+            updated_at: updated,
+            deleted_at: None,
+        }
+    }
+
+    /// 远端墓碑分类同步到本地：本地活跃、远端已删、base 有。
+    /// 本地未编辑 → 删除生效，墓碑保留在快照，但不复活为活跃分类。
+    #[test]
+    fn merge_category_remote_tombstone_does_not_revive() {
+        let mut base = SnapshotV2::default();
+        base.categories.push(cat("工作", "#34C7A8", 0, 100));
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        // 远端删除「工作」：写墓碑 + updatedAt 刷新
+        remote.categories[0].deleted_at = Some(300);
+        remote.categories[0].updated_at = 300;
+
+        let merged = merge3(&local, &remote, Some(&base), 1000, None);
+        let work = merged.categories.iter().find(|c| c.name == "工作").unwrap();
+        assert!(work.deleted_at.is_some(), "远端删除应保留墓碑");
+        // 墓碑分类不属于可见分类，UI 不再渲染 → 不会“复活”
+        assert!(merged
+            .categories
+            .iter()
+            .find(|c| c.name == "工作")
+            .unwrap()
+            .deleted_at
+            .is_some());
+    }
+
+    /// 本地墓碑删除应传播给其他端：本地删除、远端仍活跃、base 有、远端未编辑 → 删除生效。
+    #[test]
+    fn merge_category_local_tombstone_propagates_delete() {
+        let mut base = SnapshotV2::default();
+        base.categories.push(cat("生活", "#5AA9E6", 1, 100));
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        local.categories[0].deleted_at = Some(250);
+        local.categories[0].updated_at = 250;
+
+        let merged = merge3(&local, &remote, Some(&base), 1000, None);
+        let life = merged.categories.iter().find(|c| c.name == "生活").unwrap();
+        assert!(life.deleted_at.is_some(), "本地墓碑应传播到合并结果");
+    }
+
+    /// 墓碑 vs 编辑：删除之后对方真正编辑内容（改色）→ 编辑胜，恢复活跃分类。
+    #[test]
+    fn merge_category_edit_after_tombstone_revives() {
+        let mut base = SnapshotV2::default();
+        base.categories.push(cat("学习", "#F2A65A", 2, 100));
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        remote.categories[0].deleted_at = Some(300);
+        remote.categories[0].updated_at = 300;
+        // 本地相对 base 真实编辑了颜色（比墓碑晚）
+        local.categories[0].color = "#22B8CF".into();
+        local.categories[0].updated_at = 500;
+
+        let merged = merge3(&local, &remote, Some(&base), 1000, None);
+        let study = merged.categories.iter().find(|c| c.name == "学习").unwrap();
+        assert!(study.deleted_at.is_none(), "删除后本地编辑应复活");
+        assert_eq!(study.color, "#22B8CF");
+    }
+
+    /// base 缺失（首次同步无基线）时保守传播删除：本地墓碑 vs 远端同名活跃，
+    /// 无法确认远端是否真编辑过 → 墓碑胜，符合手机端/桌面端「base 缺失保守传播删除」契约。
+    #[test]
+    fn merge_category_tombstone_wins_without_base() {
+        let mut local = SnapshotV2::default();
+        local.categories.push(cat("采购", "#A78BFA", 3, 100));
+        local.categories[0].deleted_at = Some(200);
+        local.categories[0].updated_at = 200;
+        let mut remote = SnapshotV2::default();
+        // 远端删除后重建同名「采购」（无 base 无法证明这是「真编辑」）
+        remote.categories.push(cat("采购", "#F08A8A", 4, 500));
+
+        // base 为空 → 保守：墓碑胜，删除传播
+        let merged = merge3(&local, &remote, None, 1000, None);
+        let purchases: Vec<_> = merged
+            .categories
+            .iter()
+            .filter(|c| c.name == "采购")
+            .collect();
+        assert_eq!(purchases.len(), 1, "同名分类按 name 合并为一条");
+        assert_eq!(purchases[0].deleted_at, Some(200), "base 缺失保守传播删除");
+
+        // 但当 base 确认远端「内容相对 base 变化」时（改色 + 时间更晚）→ 编辑胜
+        let mut base = SnapshotV2::default();
+        base.categories.push(cat("采购", "#A78BFA", 3, 300));
+        let mut local2 = base.clone();
+        local2.categories[0].deleted_at = Some(400);
+        local2.categories[0].updated_at = 400;
+        let mut remote2 = base.clone();
+        remote2.categories[0].color = "#F08A8A".into();
+        remote2.categories[0].updated_at = 500;
+        let merged2 = merge3(&local2, &remote2, Some(&base), 1000, None);
+        let purchases2: Vec<_> = merged2
+            .categories
+            .iter()
+            .filter(|c| c.name == "采购")
+            .collect();
+        assert_eq!(purchases2.len(), 1);
+        assert_eq!(purchases2[0].deleted_at, None, "远端改色编辑胜，复活");
+        assert_eq!(purchases2[0].color, "#F08A8A");
+    }
 }

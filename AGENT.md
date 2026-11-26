@@ -75,7 +75,8 @@ SnapshotV2 { version: 2, revision, exportedAt, deviceId, lastSyncAt,
 - 与桌面 / 手机 / TUI 共用同一 wire 契约，远端文件名 `doit-backup.json`
 - `deletedAt` 有 `#[serde(default)]` 以兼容旧快照
 - 优先级：`0 不设 / 1 低 / 2 普通 / 3 高 / 4 紧急`
-- 删除写墓碑，不物理移除；`today_tree()` / `build_tree()` 自动过滤
+- 删除写墓碑，不物理移除；`today_tree()` / `build_tree()` 自动过滤；`mark_deleted()` 后调 `recalc_up()`，最后一个未完成任务被删时父任务立即完成
+- `recalc_up()` 只在完成态翻转时刷新 `completed_at`/`updated_at`；启动与同步落盘前调 `recalc_all()` 自愈历史脏数据（墓碑子任务不算有效子任务）
 
 ### 4.2 同步流程
 
@@ -121,6 +122,12 @@ SnapshotV2 { version: 2, revision, exportedAt, deviceId, lastSyncAt,
 - 本地 `save()` 在同步开启且非同步中时置 `dirty`；成功回调在 `save()` 之后再置回 `synced`
 
 新增状态时必须同时更新 `sync_badge`、`sync_icon`、`AppState` 赋值点和顶栏渲染。
+
+### 4.6 今日页紧急优先
+
+- `SnapshotV2::today_tree(filter, sort_by_priority)` 在第二参数为真时**只**对顶级 `TaskNode` 做稳定降序（4→0），`subs` 顺序与引用不动；顶栏进度统计传 `false`，不受排序影响
+- 顶栏开关只在 `Page::Today` 显示，位于同步胶囊左侧；常态红字红框，开启后实心红底白字，点击 `AppState::toggle_sort_by_priority()`
+- 偏好存 `AppSettings.sort_by_priority`（settings.json，serde camelCase），属本地 UI 设置，**不进同步快照**；四端语义一致
 
 ## 5. GPUI 平台陷阱（改 UI 前必读）
 

@@ -29,7 +29,7 @@ pub fn render_topbar(
     let date_label = format!("{}月{}日 周{}", now.month(), now.day(), weekday);
     let (today_done, today_total) = {
         let snapshot = &state.read(cx).snapshot;
-        let nodes = snapshot.today_tree(None);
+        let nodes = snapshot.today_tree(None, false);
         (
             nodes.iter().filter(|n| n.task.done).count(),
             nodes.len(),
@@ -141,6 +141,50 @@ pub fn render_topbar(
                         .flex()
                         .items_center()
                         .gap(px(10.0))
+                        // 紧急优先开关：与桌面端一致放在同步按钮左侧，仅今日页显示
+                        .when(page == Page::Today, |e| {
+                            let active = state.read(cx).settings.sort_by_priority;
+                            let s_sort = state.clone();
+                            let urgent = p.prio_urgent;
+                            e.child(
+                                div()
+                                    .id("sort-priority-pill")
+                                    .h(px(38.0))
+                                    .px(px(13.0))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(urgent)
+                                    .bg(if active { urgent } else { p.card })
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.0))
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(if active { rgb(0xFFFFFF) } else { urgent })
+                                    .cursor_pointer()
+                                    .hover(move |h| {
+                                        h.bg(if active {
+                                            urgent
+                                        } else {
+                                            p.warn_bg
+                                        })
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        s_sort.update(cx, |st, cx| {
+                                            st.toggle_sort_by_priority();
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(
+                                        svg()
+                                            .data(&icons::flag())
+                                            .w(px(16.0))
+                                            .h(px(16.0))
+                                            .text_color(if active { rgb(0xFFFFFF) } else { urgent }),
+                                    )
+                                    .child("紧急优先"),
+                            )
+                        })
                         .child({
                             let s_sync = state.clone();
                             div()

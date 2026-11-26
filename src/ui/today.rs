@@ -36,7 +36,7 @@ fn top_unfinished_by_cat(state: &Entity<AppState>, cx: &App) -> std::collections
 /// 渲染「固定」的分类导航（放在滚动容器之外，滚动时不跟随）
 pub fn render_cat_nav(state: &Entity<AppState>, filter: &str, cx: &App) -> impl IntoElement {
     let p = state.read(cx).theme().palette();
-    let categories = state.read(cx).snapshot.categories.clone();
+    let categories = state.read(cx).snapshot.visible_categories();
     let unfinished = top_unfinished_by_cat(state, cx);
 
     // ---------------- 分类胶囊导航 ----------------
@@ -226,7 +226,8 @@ pub fn render_today(
 ) -> impl IntoElement {
     let p = state.read(cx).theme().palette();
     let collapsed: HashSet<String> = state.read(cx).collapsed.clone();
-    let nodes = state.read(cx).snapshot.today_tree(Some(filter));
+    let sort_by_priority = state.read(cx).settings.sort_by_priority;
+    let nodes = state.read(cx).snapshot.today_tree(Some(filter), sort_by_priority);
     let show_category = filter == "all";
 
     // ---------------- 任务列表（父/子各自独立卡片） ----------------

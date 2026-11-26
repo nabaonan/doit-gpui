@@ -428,7 +428,14 @@ fn category_entries(state: &Entity<AppState>, range: Range, cx: &App) -> Vec<Cat
     }
 
     let categories = state.read(cx).snapshot.categories.clone();
-    let mut names: Vec<String> = categories.iter().map(|c| c.name.clone()).collect();
+    // 主列表只用可见分类（墓碑分类不属于当前分类，对齐桌面端 visibleCategories）
+    let mut names: Vec<String> = state
+        .read(cx)
+        .snapshot
+        .visible_categories()
+        .into_iter()
+        .map(|c| c.name.clone())
+        .collect();
     // 区间内仍有完成记录、但已从分类列表移除的旧分类也要出现在图例中
     for name in by_cat.keys() {
         if !names.contains(name) {

@@ -231,7 +231,13 @@ fn category_menu(
     p: &'static DoitPalette,
     cx: &App,
 ) -> impl IntoElement {
-    let cats = state.read(cx).snapshot.categories.clone();
+    let cats: Vec<crate::domain::types::Category> = state
+        .read(cx)
+        .snapshot
+        .visible_categories()
+        .into_iter()
+        .cloned()
+        .collect();
     let cur = state.read(cx).quick_add_category.clone();
 
     let mut menu = div()

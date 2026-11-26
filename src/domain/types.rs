@@ -127,6 +127,10 @@ pub struct AppSettings {
     pub skin: String,            // "mint" | "soft"
     pub progress_color: String,  // hex，如 #3FBB9C
     pub webdav: WebDavSettings,
+    /// 今日待办「紧急优先」：只重排顶级任务（4→0），子任务顺序不变。
+    /// 本地 UI 偏好，不进同步快照。
+    #[serde(default)]
+    pub sort_by_priority: bool,
 }
 
 impl Default for AppSettings {
@@ -136,6 +140,7 @@ impl Default for AppSettings {
             skin: "mint".into(),
             progress_color: "#3FBB9C".into(),
             webdav: WebDavSettings::default(),
+            sort_by_priority: false,
         }
     }
 }

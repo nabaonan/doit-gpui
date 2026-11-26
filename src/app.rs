@@ -136,7 +136,9 @@ pub struct AppState {
 impl AppState {
     pub fn new(window: &mut Window, cx: &mut App) -> Self {
         let store = SnapshotStore::new(default_data_dir());
-        let snapshot = store.load().unwrap_or_else(|_| SnapshotV2::default());
+        let mut snapshot = store.load().unwrap_or_else(|_| SnapshotV2::default());
+        // 历史脏数据自愈：删子任务未重算父任务、同步拉入墓碑后父任务可能永远未完成。
+        snapshot.recalc_all();
         // 首次启动注入演示数据（与原型一致），方便直接看到效果
         let snapshot = if snapshot.tasks.is_empty() {
             crate::domain::seed::demo_snapshot()
@@ -182,7 +184,7 @@ impl AppState {
         let webdav_enabled = settings.webdav.enabled;
         let today = chrono::Local::now().date_naive();
         let first_cat = snapshot
-            .categories
+            .visible_categories()
             .first()
             .map_or_else(|| "全部".to_string(), |c| c.name.clone());
         Self {
@@ -242,6 +244,17 @@ impl AppState {
     /// 与快照分离存放，避免任务变更时的频繁写入覆盖设置。
     pub fn save_settings(&self) {
         let _ = self.store.save_settings(&self.settings);
+    }
+
+    /// 切换今日页「紧急优先」（只重排顶级任务）。偏好写本地 settings，不进同步快照。
+    pub fn toggle_sort_by_priority(&mut self) {
+        self.settings.sort_by_priority = !self.settings.sort_by_priority;
+        self.save_settings();
+        self.notify_msg(if self.settings.sort_by_priority {
+            "紧急优先：顶级任务按优先级排序"
+        } else {
+            "已恢复手动顺序"
+        });
     }
 
     pub fn notify_msg(&mut self, msg: impl Into<String>) {
@@ -352,6 +365,8 @@ impl AppState {
                 match result {
                     Ok(outcome) => {
                         st.snapshot = outcome.snapshot;
+                        // 远端墓碑/完成态可能让父任务判定过时，落盘前先自愈。
+                        st.snapshot.recalc_all();
                         st.snapshot.exported_at = crate::domain::types::now_millis();
                         st.save();
                         // 基线只记录本次成功同步的结果，供下次三方合并
@@ -428,7 +443,7 @@ impl AppState {
             return self.filter.clone();
         }
         self.snapshot
-            .categories
+            .visible_categories()
             .first()
             .map_or_else(String::new, |c| c.name.clone())
     }
@@ -514,8 +529,8 @@ impl AppState {
         // 历史色可能不带 #，归一化后再比对，避免重复占用同一色卡
         let used: Vec<String> = self
             .snapshot
-            .categories
-            .iter()
+            .visible_categories()
+            .into_iter()
             .map(|c| crate::domain::color::normalize_category_color(&c.color))
             .collect();
         SnapshotV2::CAT_PALETTE

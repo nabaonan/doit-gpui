@@ -285,8 +285,8 @@ pub fn render_card(
             let cats: Vec<crate::ui::ctx_menu::CategoryRef> = state
                 .read(cx)
                 .snapshot
-                .categories
-                .iter()
+                .visible_categories()
+                .into_iter()
                 .map(|c| crate::ui::ctx_menu::CategoryRef {
                     name: c.name.clone(),
                     color: c.color.clone(),
